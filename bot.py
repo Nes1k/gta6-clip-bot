@@ -62,6 +62,14 @@ def main():
     existing = get_existing_files(drive)
     uploaded = 0
 
+    vf_filter = (
+        "split[original][copy];"
+        "[copy]scale=1080:1920:force_original_aspect_ratio=increase,"
+        "crop=1080:1920,boxblur=20:10[blurred];"
+        "[original]scale=1080:-1[scaled];"
+        "[blurred][scaled]overlay=(W-w)/2:(H-h)/2"
+    )
+
     for clip in clips:
         if uploaded >= 5:
             break
@@ -78,4 +86,20 @@ def main():
         
         subprocess.run([
             "ffmpeg", "-y", "-i", raw_file,
-            "-vf", "split[original][copy];[copy]scale=1080:1920:force_original_aspect_ratio=increase,crop=108
+            "-vf", vf_filter,
+            "-c:v", "libx264", "-preset", "fast", "-crf", "23", "-c:a", "aac", filename
+        ], check=True)
+        
+        media = MediaFileUpload(filename, mimetype="video/mp4")
+        drive.files().create(
+            body={"name": filename, "parents": [FOLDER_ID]},
+            media_body=media
+        ).execute()
+        
+        print(f"Yuklendi: {filename}")
+        uploaded += 1
+        os.remove(raw_file)
+        os.remove(filename)
+
+if __name__ == "__main__":
+    main()
