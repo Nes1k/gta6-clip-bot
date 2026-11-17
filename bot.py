@@ -24,6 +24,9 @@ BLACKLIST_CHANNELS = {
     "trailer_kanal_adi_2"
 }
 
+# Başlığında bu kelimeler geçen sahte/modlu GTA 5 kliplerini atla
+SKIP_KEYWORDS = ["trailer", "fivem", "gta 5", "gtav", "mod", "roleplay", "rp"]
+
 HOOK_TITLES = [
     "GTA 6 GRAPHICS ARE UNREAL!",
     "ROCKSTAR THOUGHT OF EVERYTHING!",
@@ -67,9 +70,10 @@ def format_ass_time(seconds):
 def generate_shorts_subtitles(video_path, ass_path, model):
     segments, _ = model.transcribe(
         video_path,
+        language="en",
         word_timestamps=True,
         vad_filter=True,
-        vad_parameters=dict(min_silence_duration_ms=500)
+        vad_parameters=dict(min_silence_duration_ms=400)
     )
     
     ass_header = """[Script Info]
@@ -90,7 +94,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             continue
         chunk = []
         for word in segment.words:
-            if word.probability < 0.45:
+            if word.probability < 0.30:
                 continue
             chunk.append(word)
             if len(chunk) == 3 or word == segment.words[-1]:
@@ -164,7 +168,7 @@ def upload_to_youtube(youtube_service, filename):
     response = None
     while response is None:
         _, response = request.next_chunk()
-    print(f"YouTube'a yuklendi (Private): {response.get('id')}")
+    print(f"BASARILI - YouTube'a yuklendi (Private): https://youtube.com/shorts/{response.get('id')}")
 
 def main():
     token = get_twitch_token()
@@ -172,11 +176,11 @@ def main():
     
     game_id = get_game_id(headers, "Grand Theft Auto VI") or get_game_id(headers, "Just Chatting")
     
-    started_at = (datetime.now(timezone.utc) - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    started_at = (datetime.now(timezone.utc) - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
     r = requests.get("https://api.twitch.tv/helix/clips", headers=headers, params={
         "game_id": game_id,
         "started_at": started_at,
-        "first": 20
+        "first": 30
     })
     clips = r.json().get("data", [])
     
@@ -191,11 +195,16 @@ def main():
         if uploaded >= 2:
             break
             
+        # Sadece İngilizce yayınları al (Fransızca/İspanyolca vb. elenir)
+        if clip.get("language") != "en":
+            continue
+
         broadcaster = clip["broadcaster_name"]
         if broadcaster.lower() in BLACKLIST_CHANNELS:
             continue
             
-        if "trailer" in clip["title"].lower():
+        title_lower = clip["title"].lower()
+        if any(kw in title_lower for kw in SKIP_KEYWORDS):
             continue
 
         clip_id = clip["id"]
@@ -246,7 +255,7 @@ def main():
         try:
             upload_to_youtube(youtube, filename)
         except Exception as e:
-            print(f"YouTube yükleme atlandı (Kota veya izin durumu): {e}")
+            print(f"YOUTUBE HATA DETAYI: {e}")
 
         uploaded += 1
         for temp in (raw_file, ass_file, filename):
