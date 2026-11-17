@@ -1,4 +1,5 @@
 import os
+import time
 import subprocess
 import requests
 from datetime import datetime, timedelta, timezone
@@ -44,6 +45,16 @@ def get_existing_files(service):
     ).execute()
     return {f["name"] for f in results.get("files", [])}
 
+def upload_resumable(service, filename, folder_id):
+    media = MediaFileUpload(filename, mimetype="video/mp4", chunksize=2*1024*1024, resumable=True)
+    request = service.files().create(
+        body={"name": filename, "parents": [folder_id]},
+        media_body=media
+    )
+    response = None
+    while response is None:
+        status, response = request.next_chunk()
+
 def main():
     token = get_twitch_token()
     headers = {"Client-ID": TWITCH_CLIENT_ID, "Authorization": f"Bearer {token}"}
@@ -71,7 +82,7 @@ def main():
     )
 
     for clip in clips:
-        if uploaded >= 5:
+        if uploaded >= 3:
             break
         clip_id = clip["id"]
         broadcaster = clip["broadcaster_name"]
@@ -87,19 +98,24 @@ def main():
         subprocess.run([
             "ffmpeg", "-y", "-i", raw_file,
             "-vf", vf_filter,
-            "-c:v", "libx264", "-preset", "fast", "-crf", "23", "-c:a", "aac", filename
+            "-c:v", "libx264", "-preset", "fast", "-crf", "26", "-c:a", "aac", filename
         ], check=True)
         
-        media = MediaFileUpload(filename, mimetype="video/mp4")
-        drive.files().create(
-            body={"name": filename, "parents": [FOLDER_ID]},
-            media_body=media
-        ).execute()
+        for attempt in range(3):
+            try:
+                upload_resumable(drive, filename, FOLDER_ID)
+                print(f"Yuklendi: {filename}")
+                uploaded += 1
+                break
+            except Exception as e:
+                print(f"Tekrar deneniyor ({attempt+1}/3): {e}")
+                time.sleep(3)
+                drive = get_drive_service()
         
-        print(f"Yuklendi: {filename}")
-        uploaded += 1
-        os.remove(raw_file)
-        os.remove(filename)
+        if os.path.exists(raw_file):
+            os.remove(raw_file)
+        if os.path.exists(filename):
+            os.remove(filename)
 
 if __name__ == "__main__":
     main()
