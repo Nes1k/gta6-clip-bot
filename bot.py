@@ -1,0 +1,94 @@
+import os
+import json
+import subprocess
+import requests
+from datetime import datetime, timedelta, timezone
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
+
+CLIENT_ID = os.environ["TWITCH_CLIENT_ID"]
+CLIENT_SECRET = os.environ["TWITCH_CLIENT_SECRET"]
+FOLDER_ID = os.environ["DRIVE_FOLDER_ID"]
+CREDS_JSON = json.loads(os.environ["GDRIVE_CREDENTIALS"])
+
+def get_twitch_token():
+    r = requests.post("https://id.twitch.tv/oauth2/token", params={
+        "client_id": CLIENT_ID,
+        "client_secret": CLIENT_SECRET,
+        "grant_type": "client_credentials"
+    })
+    return r.json()["access_token"]
+
+def get_game_id(headers, game_name):
+    r = requests.get("https://api.twitch.tv/helix/games", headers=headers, params={"name": game_name})
+    data = r.json().get("data", [])
+    return data[0]["id"] if data else None
+
+def get_drive_service():
+    creds = service_account.Credentials.from_service_account_info(
+        CREDS_JSON, scopes=["https://www.googleapis.com/auth/drive"]
+    )
+    return build("drive", "v3", credentials=creds)
+
+def get_existing_files(service):
+    results = service.files().list(
+        q=f"'{FOLDER_ID}' in parents and trashed=false",
+        fields="files(name)"
+    ).execute()
+    return {f["name"] for f in results.get("files", [])}
+
+def main():
+    token = get_twitch_token()
+    headers = {"Client-ID": CLIENT_ID, "Authorization": f"Bearer {token}"}
+    
+    # GTA 6 kategorisini bul (Henüz açılmadıysa Just Chatting ile test eder)
+    game_id = get_game_id(headers, "Grand Theft Auto VI") or get_game_id(headers, "Just Chatting")
+    
+    # Son 1 saatin en çok izlenen kliplerini çek
+    started_at = (datetime.now(timezone.utc) - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    r = requests.get("https://api.twitch.tv/helix/clips", headers=headers, params={
+        "game_id": game_id,
+        "started_at": started_at,
+        "first": 15
+    })
+    clips = r.json().get("data", [])
+    
+    drive = get_drive_service()
+    existing = get_existing_files(drive)
+    uploaded = 0
+
+    for clip in clips:
+        if uploaded >= 5:
+            break
+        clip_id = clip["id"]
+        broadcaster = clip["broadcaster_name"]
+        safe_title = "".join(c for c in clip["title"] if c.isalnum() or c in " -_")[:35].strip()
+        filename = f"{broadcaster}_{safe_title}_{clip_id[:6]}.mp4"
+        
+        if filename in existing:
+            continue
+            
+        raw_file = f"raw_{clip_id}.mp4"
+        subprocess.run(["yt-dlp", "-o", raw_file, clip["url"]], check=True)
+        
+        # Videoyu otomatik 9:16 dikey Shorts formatına (arkası bulanık + ortada net video) çevir
+        subprocess.run([
+            "ffmpeg", "-y", "-i", raw_file,
+            "-vf", "split[original][copy];[copy]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=20:10[blurred];[original]scale=1080:-1[scaled];[blurred][scaled]overlay=(W-w)/2:(H-h)/2",
+            "-c:v", "libx264", "-preset", "fast", "-crf", "23", "-c:a", "aac", filename
+        ], check=True)
+        
+        media = MediaFileUpload(filename, mimetype="video/mp4")
+        drive.files().create(
+            body={"name": filename, "parents": [FOLDER_ID]},
+            media_body=media
+        ).execute()
+        
+        print(f"Yuklendi: {filename}")
+        uploaded += 1
+        os.remove(raw_file)
+        os.remove(filename)
+
+if __name__ == "__main__":
+    main()
