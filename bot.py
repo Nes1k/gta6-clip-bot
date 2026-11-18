@@ -4,6 +4,7 @@ import time
 import random
 import subprocess
 import requests
+import cloudscraper
 from datetime import datetime, timedelta, timezone
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
@@ -19,6 +20,15 @@ GDRIVE_CLIENT_SECRET = os.environ["GDRIVE_CLIENT_SECRET"]
 GDRIVE_REFRESH_TOKEN = os.environ["GDRIVE_REFRESH_TOKEN"]
 YT_REFRESH_TOKEN = os.environ["YT_REFRESH_TOKEN"]
 
+# Takip edilecek Türk Kick yayıncıları (Kullanıcı adlarını küçük harfle yaz)
+KICK_STREAMERS = [
+    "rraenee",
+    "elraenn",
+    "kendinemuzisyen",
+    "wtcn",
+    "mithrain"
+]
+
 BLACKLIST_CHANNELS = {
     "trailer_kanal_adi_1",
     "trailer_kanal_adi_2"
@@ -26,21 +36,34 @@ BLACKLIST_CHANNELS = {
 
 SKIP_KEYWORDS = ["trailer", "fivem", "gta 5", "gtav", "mod", "roleplay", "rp"]
 
-HOOK_TITLES = [
+HOOK_TITLES_EN = [
     "GTA 6 GRAPHICS ARE UNREAL!",
     "ROCKSTAR THOUGHT OF EVERYTHING!",
     "THIS GTA 6 DETAIL IS INSANE!",
     "NEXT-GEN PHYSICS IN GTA VI!",
-    "WAIT FOR IT... GTA 6 IS WILD!",
-    "GTA 6 IS ACTUALLY CRAZY!"
+    "WAIT FOR IT... GTA 6 IS WILD!"
 ]
 
-YT_TITLES = [
+HOOK_TITLES_TR = [
+    "GTA 6 GRAFİKLERİ İNANILMAZ!",
+    "ROCKSTAR HER ŞEYİ DÜŞÜNMÜŞ!",
+    "BU GTA 6 DETAYI ÇOK İYİ!",
+    "GTA 6 FİZİKLERİ EFSANE OLMUŞ!",
+    "SONUNA KADAR İZLE... GTA 6!"
+]
+
+YT_TITLES_EN = [
     "GTA 6 Physics Are Actually INSANE! 🤯 #gta6 #shorts",
     "Rockstar Really Thought of Everything in GTA 6... 🔥 #gta6 #shorts",
     "This GTA 6 Detail Blew Everyone's Mind! 😱 #gtavi #shorts",
-    "GTA 6 Gameplay Looks Next-Gen! 🚨 #gta6 #rockstargames #shorts",
-    "Nobody Expected This Detail in GTA 6! 🔥 #gta6 #shorts"
+    "GTA 6 Gameplay Looks Next-Gen! 🚨 #gta6 #rockstargames #shorts"
+]
+
+YT_TITLES_TR = [
+    "GTA 6 Fizikleri Gerçekten İnanılmaz! 🤯 #gta6 #shorts",
+    "Rockstar GTA 6'da Her Şeyi Düşünmüş... 🔥 #gta6 #gtavi #shorts",
+    "GTA 6'daki Bu Detay Herkesi Şaşırttı! 😱 #gta6 #shorts",
+    "GTA 6 Oynanış Anları Efsane Görünüyor! 🚨 #gta6 #shorts"
 ]
 
 BAD_ROOTS = [
@@ -67,10 +90,10 @@ def format_ass_time(seconds):
     cs = int((seconds - int(seconds)) * 100)
     return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
 
-def generate_shorts_subtitles(video_path, ass_path, model):
+def generate_shorts_subtitles(video_path, ass_path, model, lang="en"):
     segments, _ = model.transcribe(
         video_path,
-        language="en",
+        language=lang,
         word_timestamps=True,
         vad_filter=True,
         vad_parameters=dict(min_silence_duration_ms=400)
@@ -110,18 +133,69 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     with open(ass_path, "w", encoding="utf-8") as f:
         f.write(ass_header + "\n".join(events))
 
-def get_twitch_token():
-    r = requests.post("https://id.twitch.tv/oauth2/token", params={
+def get_kick_clips():
+    scraper = cloudscraper.create_scraper(browser={'browser': 'chrome', 'platform': 'windows', 'desktop': True})
+    kick_list = []
+    for streamer in KICK_STREAMERS:
+        try:
+            url = f"https://kick.com/api/v2/channels/{streamer}/clips?cursor=0&sort=date&time=day"
+            r = scraper.get(url, timeout=15)
+            if r.status_code != 200:
+                print(f"Kick ({streamer}) erisim durumu: {r.status_code}")
+                continue
+            data = r.json().get("clips", [])
+            for c in data[:3]:
+                video_url = c.get("clip_url") or c.get("video_url")
+                if not video_url:
+                    continue
+                kick_list.append({
+                    "id": str(c["id"]),
+                    "broadcaster": streamer.capitalize(),
+                    "title": c.get("title", "GTA 6 Clip"),
+                    "url": video_url,
+                    "lang": "tr",
+                    "platform": "kick"
+                })
+        except Exception as e:
+            print(f"Kick ({streamer}) cekilemedi: {e}")
+    return kick_list
+
+def get_twitch_clips():
+    r_tok = requests.post("https://id.twitch.tv/oauth2/token", params={
         "client_id": TWITCH_CLIENT_ID,
         "client_secret": TWITCH_CLIENT_SECRET,
         "grant_type": "client_credentials"
     })
-    return r.json()["access_token"]
-
-def get_game_id(headers, game_name):
-    r = requests.get("https://api.twitch.tv/helix/games", headers=headers, params={"name": game_name})
-    data = r.json().get("data", [])
-    return data[0]["id"] if data else None
+    token = r_tok.json()["access_token"]
+    headers = {"Client-ID": TWITCH_CLIENT_ID, "Authorization": f"Bearer {token}"}
+    
+    r_game = requests.get("https://api.twitch.tv/helix/games", headers=headers, params={"name": "Grand Theft Auto VI"})
+    data = r_game.json().get("data", [])
+    if not data:
+        return []
+    game_id = data[0]["id"]
+    
+    started_at = (datetime.now(timezone.utc) - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    r = requests.get("https://api.twitch.tv/helix/clips", headers=headers, params={
+        "game_id": game_id,
+        "started_at": started_at,
+        "first": 40
+    })
+    twitch_list = []
+    for clip in r.json().get("data", []):
+        if clip.get("language") != "en":
+            continue
+        if clip.get("view_count", 0) < 10:
+            continue
+        twitch_list.append({
+            "id": clip["id"],
+            "broadcaster": clip["broadcaster_name"],
+            "title": clip["title"],
+            "url": clip["url"],
+            "lang": "en",
+            "platform": "twitch"
+        })
+    return twitch_list
 
 def get_creds(refresh_token):
     return Credentials(
@@ -150,13 +224,20 @@ def upload_to_drive(drive_service, filename, folder_id):
     while response is None:
         _, response = request.next_chunk()
 
-def upload_to_youtube(youtube_service, filename):
-    title = random.choice(YT_TITLES)
+def upload_to_youtube(youtube_service, filename, lang="en", broadcaster=""):
+    if lang == "tr":
+        base_title = random.choice(YT_TITLES_TR)
+        title = f"{broadcaster} - {base_title}"[:95]
+        desc = f"{broadcaster} GTA 6 (Grand Theft Auto VI) en iyi anlar ve tepkiler.\n\n#gta6 #gtavi #{broadcaster.lower()} #shorts"
+    else:
+        title = random.choice(YT_TITLES_EN)
+        desc = "Grand Theft Auto VI (GTA 6) best moments and gameplay clips.\n\n#gta6 #gtavi #rockstargames #shorts"
+
     body = {
         "snippet": {
             "title": title,
-            "description": "Grand Theft Auto VI (GTA 6) best moments and gameplay clips.\n\n#gta6 #gtavi #rockstargames #shorts",
-            "tags": ["gta 6", "gta vi", "rockstar games", "gta 6 gameplay", "shorts"],
+            "description": desc,
+            "tags": ["gta 6", "gta vi", "rockstar games", "gta 6 gameplay", "shorts", broadcaster.lower()],
             "categoryId": "20"
         },
         "status": {
@@ -172,22 +253,8 @@ def upload_to_youtube(youtube_service, filename):
     print(f"BASARILI - YouTube'a yuklendi (Private): https://youtube.com/shorts/{response.get('id')}")
 
 def main():
-    token = get_twitch_token()
-    headers = {"Client-ID": TWITCH_CLIENT_ID, "Authorization": f"Bearer {token}"}
-    
-    game_id = get_game_id(headers, "Grand Theft Auto VI")
-    if not game_id:
-        print("GTA 6 Game ID bulunamadi!")
-        return
-    
-    # Son 1 saatin en cok izlenen 50 klibini tara
-    started_at = (datetime.now(timezone.utc) - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    r = requests.get("https://api.twitch.tv/helix/clips", headers=headers, params={
-        "game_id": game_id,
-        "started_at": started_at,
-        "first": 50
-    })
-    clips = r.json().get("data", [])
+    # Önce Kick'teki Türk yayıncı kliplerini, ardından Twitch global kliplerini birleştir
+    all_clips = get_kick_clips() + get_twitch_clips()
     
     drive = build("drive", "v3", credentials=get_creds(GDRIVE_REFRESH_TOKEN))
     youtube = build("youtube", "v3", credentials=get_creds(YT_REFRESH_TOKEN))
@@ -196,19 +263,11 @@ def main():
     whisper_model = WhisperModel("small", device="cpu", compute_type="int8")
     uploaded = 0
 
-    for clip in clips:
-        # Her 10 dakikada bir maksimum 4 klip uret
+    for clip in all_clips:
         if uploaded >= 4:
             break
             
-        if clip.get("language") != "en":
-            continue
-
-        # En az 10 izlenmesi olan kaliteli klipleri sec
-        if clip.get("view_count", 0) < 10:
-            continue
-
-        broadcaster = clip["broadcaster_name"]
+        broadcaster = clip["broadcaster"]
         if broadcaster.lower() in BLACKLIST_CHANNELS:
             continue
             
@@ -217,8 +276,8 @@ def main():
             continue
 
         clip_id = clip["id"]
-        safe_title = "".join(c for c in clip["title"] if c.isalnum() or c in " -_")[:35].strip()
-        filename = f"{broadcaster}_{safe_title}_{clip_id[:6]}.mp4"
+        safe_title = "".join(c for c in clip["title"] if c.isalnum() or c in " -_")[:30].strip()
+        filename = f"[{clip['platform'].upper()}]_{broadcaster}_{safe_title}_{clip_id[:6]}.mp4"
         
         if filename in existing:
             continue
@@ -226,10 +285,16 @@ def main():
         raw_file = f"raw_{clip_id}.mp4"
         ass_file = f"sub_{clip_id}.ass"
         
-        subprocess.run(["yt-dlp", "-o", raw_file, clip["url"]], check=True)
-        generate_shorts_subtitles(raw_file, ass_file, whisper_model)
+        try:
+            subprocess.run(["yt-dlp", "-o", raw_file, clip["url"]], check=True)
+        except Exception as e:
+            print(f"Video indirilemedi ({broadcaster}): {e}")
+            continue
+
+        lang = clip["lang"]
+        generate_shorts_subtitles(raw_file, ass_file, whisper_model, lang=lang)
         
-        hook_text = random.choice(HOOK_TITLES)
+        hook_text = random.choice(HOOK_TITLES_TR if lang == "tr" else HOOK_TITLES_EN)
         font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
         
         vf_filter = (
@@ -262,7 +327,7 @@ def main():
                 drive = build("drive", "v3", credentials=get_creds(GDRIVE_REFRESH_TOKEN))
         
         try:
-            upload_to_youtube(youtube, filename)
+            upload_to_youtube(youtube, filename, lang=lang, broadcaster=broadcaster)
         except Exception as e:
             print(f"YouTube kotasi dolu veya atlandi: {e}")
 
