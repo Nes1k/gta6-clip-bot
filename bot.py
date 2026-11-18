@@ -73,7 +73,7 @@ BAD_ROOTS = [
 ]
 
 def detect_webcam_box(video_path):
-    """Ön yüz, yan profil ve göz taramasıyla yayıncı kamerasını bulur; bulamazsa sol alt köşeyi alır."""
+    """Ön yüz ve yan profil taramasıyla yayıncı kamerasını bulur; bulamazsa sol alt köşeyi alır."""
     cap = cv2.VideoCapture(video_path)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     vw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -86,10 +86,10 @@ def detect_webcam_box(video_path):
     frontal_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
     profile_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_profileface.xml")
     
-    # Ekranın 4 köşesindeki tespitleri puanla (Oyun ortasındaki NPC yüzlerini eler!)
     corner_hits = {"top_left": [], "bottom_left": [], "top_right": [], "bottom_right": []}
 
-    for i in range(1, 13):
+    # Hızlı tarama için videonun 4 farklı noktasını kontrol et
+    for i in [2, 5, 8, 11]:
         cap.set(cv2.CAP_PROP_POS_FRAMES, int(total_frames * (i / 13.0)))
         ret, frame = cap.read()
         if not ret:
@@ -102,7 +102,6 @@ def detect_webcam_box(video_path):
             
         for (x, y, w, h) in faces:
             cx, cy = x + w // 2, y + h // 2
-            # Sadece ekranın sol %38 veya sağ %38 kenarındaki (webcam bölgeleri) yüzleri kabul et
             if cx < vw * 0.38:
                 if cy < vh * 0.5:
                     corner_hits["top_left"].append((x, y, w, h))
@@ -116,14 +115,11 @@ def detect_webcam_box(video_path):
 
     cap.release()
 
-    # Üst panel oranı (1080x760) için standart webcam kutu boyutu
     box_h = int(vh * 0.36)
     box_w = int(box_h * (1080 / 760))
 
-    # En çok yüz bulunan köşeyi seç
     best_corner = max(corner_hits, key=lambda k: len(corner_hits[k]))
     if len(corner_hits[best_corner]) > 0:
-        # Bulunan yüzlerin ortalama merkezini al
         avg_cx = sum(b[0] + b[2] // 2 for b in corner_hits[best_corner]) // len(corner_hits[best_corner])
         avg_cy = sum(b[1] + b[3] // 2 for b in corner_hits[best_corner]) // len(corner_hits[best_corner])
         crop_x = max(0, min(vw - box_w, avg_cx - box_w // 2))
@@ -131,7 +127,6 @@ def detect_webcam_box(video_path):
         print(f"Webcam bolgesi tespit edildi ({best_corner}): {box_w}x{box_h} @ ({crop_x},{crop_y})")
         return (box_w, box_h, crop_x, crop_y)
 
-    # Hiç yüz bulunamasa bile yayıncıların %90 kullandığı sol alt köşeyi sabit kes (Garanti Split-Screen)
     print("Yuz algilanamadi -> Varsayilan Sol Alt Webcam alani kullaniliyor")
     return (box_w, box_h, 0, vh - box_h)
 
@@ -322,11 +317,11 @@ def main():
     youtube = build("youtube", "v3", credentials=get_creds(YT_REFRESH_TOKEN))
     
     existing = get_existing_files(drive)
-    whisper_model = WhisperModel("small", device="cpu", compute_type="int8")
+    whisper_model = WhisperModel("base", device="cpu", compute_type="int8")
     uploaded = 0
 
     for clip in all_clips:
-        if uploaded >= 4:
+        if uploaded >= 2:
             break
             
         broadcaster = clip["broadcaster"]
@@ -361,7 +356,6 @@ def main():
         
         cw, ch, cx, cy = detect_webcam_box(raw_file)
         
-        # Her videoda garantili Split-Screen: Üstte büyük kamera (1080x760), altta oyun (1080x1160)
         vf_filter = (
             f"split[cam][game];"
             f"[cam]crop={cw}:{ch}:{cx}:{cy},scale=1080:760[top];"
