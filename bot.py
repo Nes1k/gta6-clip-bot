@@ -99,6 +99,7 @@ def generate_shorts_subtitles(video_path, ass_path, model, lang="en"):
         vad_parameters=dict(min_silence_duration_ms=400)
     )
     
+    # MarginV=510 olarak güncellendi (Sıfır kırpma modunda videonun hemen altına tam oturur)
     ass_header = """[Script Info]
 ScriptType: v4.00+
 PlayResX: 1080
@@ -106,7 +107,7 @@ PlayResY: 1920
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: ShortsStyle,DejaVu Sans,72,&H0000FFFF,&H00FFFFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,6,2,2,60,60,440,1
+Style: ShortsStyle,DejaVu Sans,72,&H0000FFFF,&H00FFFFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,6,2,2,60,60,510,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -253,7 +254,6 @@ def upload_to_youtube(youtube_service, filename, lang="en", broadcaster=""):
     print(f"BASARILI - YouTube'a yuklendi (Private): https://youtube.com/shorts/{response.get('id')}")
 
 def main():
-    # Önce Kick'teki Türk yayıncı kliplerini, ardından Twitch global kliplerini birleştir
     all_clips = get_kick_clips() + get_twitch_clips()
     
     drive = build("drive", "v3", credentials=get_creds(GDRIVE_REFRESH_TOKEN))
@@ -297,16 +297,17 @@ def main():
         hook_text = random.choice(HOOK_TITLES_TR if lang == "tr" else HOOK_TITLES_EN)
         font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
         
+        # Yöntem 1: Sıfır kırpma (scale=1080:-1) ile tüm ekran ve webcamler görünür
         vf_filter = (
             f"split[original][copy];"
             f"[copy]scale=1080:1920:force_original_aspect_ratio=increase,"
             f"crop=1080:1920,boxblur=25:12,eq=brightness=-0.15[blurred];"
-            f"[original]scale=1380:-1,crop=1080:ih:(iw-1080)/2:0[scaled];"
+            f"[original]scale=1080:-1[scaled];"
             f"[blurred][scaled]overlay=0:(H-h)/2,"
             f"drawtext=fontfile={font_path}:text='{hook_text}':fontcolor=black:fontsize=46:"
-            f"box=1:boxcolor=yellow@0.95:boxborderw=22:x=(w-text_w)/2:y=290,"
+            f"box=1:boxcolor=yellow@0.95:boxborderw=22:x=(w-text_w)/2:y=380,"
             f"drawtext=fontfile={font_path}:text='GTA VI • CLIPS':fontcolor=white@0.85:fontsize=34:"
-            f"x=(w-text_w)/2:y=1560,"
+            f"x=(w-text_w)/2:y=1520,"
             f"ass={ass_file}"
         )
         
