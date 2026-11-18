@@ -21,12 +21,27 @@ GDRIVE_CLIENT_SECRET = os.environ["GDRIVE_CLIENT_SECRET"]
 GDRIVE_REFRESH_TOKEN = os.environ["GDRIVE_REFRESH_TOKEN"]
 YT_REFRESH_TOKEN = os.environ["YT_REFRESH_TOKEN"]
 
+# Kick yayıncıları (Türk + Global yayıncılar)
 KICK_STREAMERS = [
     "rraenee",
     "elraenn",
     "kendinemuzisyen",
     "wtcn",
-    "mithrain"
+    "mithrain",
+    "adinross",
+    "xqc"
+]
+
+# Twitch'te öncelikli takip edilecek büyük yayıncılar
+TWITCH_PRIORITY_STREAMERS = [
+    "kaicenat",
+    "ishowspeed",
+    "xqc",
+    "caseoh_",
+    "jynxzi",
+    "hasanabi",
+    "lirik",
+    "summit1g"
 ]
 
 BLACKLIST_CHANNELS = {
@@ -35,22 +50,6 @@ BLACKLIST_CHANNELS = {
 }
 
 SKIP_KEYWORDS = ["trailer", "fivem", "gta 5", "gtav", "mod", "roleplay", "rp"]
-
-HOOK_TITLES_EN = [
-    "GTA 6 GRAPHICS ARE UNREAL!",
-    "ROCKSTAR THOUGHT OF EVERYTHING!",
-    "THIS GTA 6 DETAIL IS INSANE!",
-    "NEXT-GEN PHYSICS IN GTA VI!",
-    "WAIT FOR IT... GTA 6 IS WILD!"
-]
-
-HOOK_TITLES_TR = [
-    "GTA 6 GRAFİKLERİ İNANILMAZ!",
-    "ROCKSTAR HER ŞEYİ DÜŞÜNMÜŞ!",
-    "BU GTA 6 DETAYI ÇOK İYİ!",
-    "GTA 6 FİZİKLERİ EFSANE OLMUŞ!",
-    "SONUNA KADAR İZLE... GTA 6!"
-]
 
 YT_TITLES_EN = [
     "GTA 6 Physics Are Actually INSANE! 🤯 #gta6 #shorts",
@@ -91,14 +90,12 @@ def detect_webcam_box(video_path, broadcaster=""):
         cap.release()
         return (600, 420, 1320, 260), "right"
 
-    # Üst panel (1080x760) için biraz daha geniş kutu (ekip kameralarını da kapsar)
     box_h = int(vh * 0.36)
     box_w = int(box_h * (1080 / 760))
 
     b_low = broadcaster.lower()
     if b_low == "rraenee":
         cap.release()
-        # Kafalar kesilmesin diye y eksenini yukarı çektik (0.31 -> 0.24)
         return (box_w, box_h, vw - box_w, int(vh * 0.24)), "right"
 
     try:
@@ -135,7 +132,6 @@ def detect_webcam_box(video_path, broadcaster=""):
                 avg_cx = sum(b[0] + b[2] // 2 for b in right_hits) // len(right_hits)
                 avg_cy = sum(b[1] + b[3] // 2 for b in right_hits) // len(right_hits)
                 crop_x = max(0, min(vw - box_w, avg_cx - box_w // 2))
-                # Kafa payı (headroom) bırakmak için kutuyu biraz yukarı kaydır
                 crop_y = max(0, min(vh - box_h, avg_cy - int(box_h * 0.42)))
                 return (box_w, box_h, crop_x, crop_y), "right"
             elif len(left_hits) > 0:
@@ -148,7 +144,8 @@ def detect_webcam_box(video_path, broadcaster=""):
         print(f"Yuz tarama hatasi ({e})")
         cap.release()
 
-    return (box_w, box_h, vw - box_w, int(vh * 0.25)), "right"
+    # Global yayıncıların (Kai, Speed vb.) çoğu sol üst veya sol orta kullanır
+    return (box_w, box_h, 0, int(vh * 0.12)), "left"
 
 def censor_text(text):
     words = text.split()
@@ -215,14 +212,19 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 def get_kick_clips():
     scraper = cloudscraper.create_scraper(browser={'browser': 'chrome', 'platform': 'windows', 'desktop': True})
     kick_list = []
-    for streamer in KICK_STREAMERS:
+    streamers = KICK_STREAMERS.copy()
+    random.shuffle(streamers)  # Her seferinde farklı Kick yayıncısı ilk sıraya gelsin
+    
+    tr_streamers = {"rraenee", "elraenn", "kendinemuzisyen", "wtcn", "mithrain"}
+    
+    for streamer in streamers:
         try:
             url = f"https://kick.com/api/v2/channels/{streamer}/clips?cursor=0&sort=date&time=day"
             r = scraper.get(url, timeout=15)
             if r.status_code != 200:
                 continue
             data = r.json().get("clips", [])
-            for c in data[:3]:
+            for c in data[:2]:  # Her yayıncıdan en fazla 2 taze klip al
                 video_url = c.get("clip_url") or c.get("video_url")
                 if not video_url:
                     continue
@@ -231,11 +233,12 @@ def get_kick_clips():
                     "broadcaster": streamer.capitalize(),
                     "title": c.get("title", "GTA 6 Clip"),
                     "url": video_url,
-                    "lang": "tr",
+                    "lang": "tr" if streamer in tr_streamers else "en",
                     "platform": "kick"
                 })
         except Exception as e:
             print(f"Kick ({streamer}) cekilemedi: {e}")
+    random.shuffle(kick_list)
     return kick_list
 
 def get_twitch_clips():
@@ -247,32 +250,50 @@ def get_twitch_clips():
     token = r_tok.json()["access_token"]
     headers = {"Client-ID": TWITCH_CLIENT_ID, "Authorization": f"Bearer {token}"}
     
+    twitch_list = []
+    started_at = (datetime.now(timezone.utc) - timedelta(hours=6)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    # 1. Öncelikli büyük yayıncıları (Kai Cenat, Speed vb.) doğrudan tara
+    r_users = requests.get("https://api.twitch.tv/helix/users", headers=headers, params={"login": TWITCH_PRIORITY_STREAMERS})
+    for u in r_users.json().get("data", []):
+        r_uclips = requests.get("https://api.twitch.tv/helix/clips", headers=headers, params={
+            "broadcaster_id": u["id"],
+            "started_at": started_at,
+            "first": 5
+        })
+        for clip in r_uclips.json().get("data", []):
+            twitch_list.append({
+                "id": clip["id"],
+                "broadcaster": clip["broadcaster_name"],
+                "title": clip["title"],
+                "url": clip["url"],
+                "lang": "en",
+                "platform": "twitch"
+            })
+
+    # 2. Genel GTA VI kategorisindeki popüler klipleri tara
     r_game = requests.get("https://api.twitch.tv/helix/games", headers=headers, params={"name": "Grand Theft Auto VI"})
     data = r_game.json().get("data", [])
-    if not data:
-        return []
-    game_id = data[0]["id"]
-    
-    started_at = (datetime.now(timezone.utc) - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    r = requests.get("https://api.twitch.tv/helix/clips", headers=headers, params={
-        "game_id": game_id,
-        "started_at": started_at,
-        "first": 40
-    })
-    twitch_list = []
-    for clip in r.json().get("data", []):
-        if clip.get("language") != "en":
-            continue
-        if clip.get("view_count", 0) < 10:
-            continue
-        twitch_list.append({
-            "id": clip["id"],
-            "broadcaster": clip["broadcaster_name"],
-            "title": clip["title"],
-            "url": clip["url"],
-            "lang": "en",
-            "platform": "twitch"
+    if data:
+        game_id = data[0]["id"]
+        r = requests.get("https://api.twitch.tv/helix/clips", headers=headers, params={
+            "game_id": game_id,
+            "started_at": started_at,
+            "first": 40
         })
+        for clip in r.json().get("data", []):
+            if clip.get("language") != "en" or clip.get("view_count", 0) < 5:
+                continue
+            twitch_list.append({
+                "id": clip["id"],
+                "broadcaster": clip["broadcaster_name"],
+                "title": clip["title"],
+                "url": clip["url"],
+                "lang": "en",
+                "platform": "twitch"
+            })
+
+    random.shuffle(twitch_list)
     return twitch_list
 
 def get_creds(refresh_token):
@@ -308,8 +329,9 @@ def upload_to_youtube(youtube_service, filename, lang="en", broadcaster=""):
         title = f"{broadcaster} - {base_title}"[:95]
         desc = f"{broadcaster} GTA 6 (Grand Theft Auto VI) en iyi anlar ve tepkiler.\n\n#gta6 #gtavi #{broadcaster.lower()} #shorts"
     else:
-        title = random.choice(YT_TITLES_EN)
-        desc = "Grand Theft Auto VI (GTA 6) best moments and gameplay clips.\n\n#gta6 #gtavi #rockstargames #shorts"
+        base_title = random.choice(YT_TITLES_EN)
+        title = f"{broadcaster} - {base_title}"[:95]
+        desc = f"{broadcaster} Grand Theft Auto VI (GTA 6) best moments and reactions.\n\n#gta6 #gtavi #{broadcaster.lower()} #shorts"
 
     body = {
         "snippet": {
@@ -330,88 +352,104 @@ def upload_to_youtube(youtube_service, filename, lang="en", broadcaster=""):
         _, response = request.next_chunk()
     print(f"BASARILI - YouTube'a yuklendi (Private): https://youtube.com/shorts/{response.get('id')}")
 
+def process_clip(clip, drive, youtube, existing, whisper_model):
+    broadcaster = clip["broadcaster"]
+    if broadcaster.lower() in BLACKLIST_CHANNELS:
+        return False
+        
+    title_lower = clip["title"].lower()
+    if any(kw in title_lower for kw in SKIP_KEYWORDS):
+        return False
+
+    clip_id = clip["id"]
+    safe_title = "".join(c for c in clip["title"] if c.isalnum() or c in " -_")[:30].strip()
+    filename = f"[{clip['platform'].upper()}]_{broadcaster}_{safe_title}_{clip_id[:6]}.mp4"
+    
+    if filename in existing:
+        return False
+        
+    raw_file = f"raw_{clip_id}.mp4"
+    ass_file = f"sub_{clip_id}.ass"
+    
+    try:
+        subprocess.run(["yt-dlp", "-o", raw_file, clip["url"]], check=True)
+        lang = clip["lang"]
+        generate_shorts_subtitles(raw_file, ass_file, whisper_model, lang=lang)
+        
+        (cw, ch, cx, cy), cam_side = detect_webcam_box(raw_file, broadcaster)
+        game_crop_x = "(iw-1080)/3" if cam_side == "right" else "2*(iw-1080)/3"
+        
+        # Sarı kanca kutusu kaldırıldı -> Temiz Split-Screen + Altyazı
+        vf_filter = (
+            f"split[cam][game];"
+            f"[cam]crop={cw}:{ch}:{cx}:{cy},scale=1080:760[top];"
+            f"[game]scale=-1:1160,crop=1080:1160:{game_crop_x}:0[bottom];"
+            f"[top][bottom]vstack=inputs=2,"
+            f"ass={ass_file}"
+        )
+        
+        subprocess.run([
+            "ffmpeg", "-y", "-i", raw_file, "-t", "58",
+            "-vf", vf_filter,
+            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "24", "-c:a", "aac", filename
+        ], check=True)
+        
+        for attempt in range(3):
+            try:
+                upload_to_drive(drive, filename, FOLDER_ID)
+                print(f"Drive'a yuklendi: {filename}")
+                break
+            except Exception as e:
+                print(f"Drive tekrar deneniyor ({attempt+1}/3): {e}")
+                time.sleep(3)
+                drive = build("drive", "v3", credentials=get_creds(GDRIVE_REFRESH_TOKEN))
+        
+        try:
+            upload_to_youtube(youtube, filename, lang=lang, broadcaster=broadcaster)
+        except Exception as e:
+            print(f"YouTube kotasi dolu veya atlandi: {e}")
+
+        return True
+    except Exception as e:
+        print(f"Klip islenirken hata olustu ({broadcaster}), siradakine geciliyor: {e}")
+        return False
+    finally:
+        for temp in (raw_file, ass_file, filename):
+            if os.path.exists(temp):
+                os.remove(temp)
+
 def main():
-    all_clips = get_kick_clips() + get_twitch_clips()
+    kick_clips = get_kick_clips()
+    twitch_clips = get_twitch_clips()
     
     drive = build("drive", "v3", credentials=get_creds(GDRIVE_REFRESH_TOKEN))
     youtube = build("youtube", "v3", credentials=get_creds(YT_REFRESH_TOKEN))
     
     existing = get_existing_files(drive)
     whisper_model = WhisperModel("base", device="cpu", compute_type="int8")
-    uploaded = 0
 
-    for clip in all_clips:
-        if uploaded >= 2:
+    # 1 klip Twitch'ten (Kai Cenat, Speed vb. dahil), 1 klip Kick'ten dengeli al
+    twitch_done = False
+    for clip in twitch_clips:
+        if process_clip(clip, drive, youtube, existing, whisper_model):
+            twitch_done = True
             break
-            
-        broadcaster = clip["broadcaster"]
-        if broadcaster.lower() in BLACKLIST_CHANNELS:
-            continue
-            
-        title_lower = clip["title"].lower()
-        if any(kw in title_lower for kw in SKIP_KEYWORDS):
-            continue
 
-        clip_id = clip["id"]
-        safe_title = "".join(c for c in clip["title"] if c.isalnum() or c in " -_")[:30].strip()
-        filename = f"[{clip['platform'].upper()}]_{broadcaster}_{safe_title}_{clip_id[:6]}.mp4"
-        
-        if filename in existing:
-            continue
-            
-        raw_file = f"raw_{clip_id}.mp4"
-        ass_file = f"sub_{clip_id}.ass"
-        
-        try:
-            subprocess.run(["yt-dlp", "-o", raw_file, clip["url"]], check=True)
-            lang = clip["lang"]
-            generate_shorts_subtitles(raw_file, ass_file, whisper_model, lang=lang)
-            
-            hook_text = random.choice(HOOK_TITLES_TR if lang == "tr" else HOOK_TITLES_EN)
-            font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-            
-            (cw, ch, cx, cy), cam_side = detect_webcam_box(raw_file, broadcaster)
-            game_crop_x = "(iw-1080)/3" if cam_side == "right" else "2*(iw-1080)/3"
-            
-            vf_filter = (
-                f"split[cam][game];"
-                f"[cam]crop={cw}:{ch}:{cx}:{cy},scale=1080:760[top];"
-                f"[game]scale=-1:1160,crop=1080:1160:{game_crop_x}:0[bottom];"
-                f"[top][bottom]vstack=inputs=2,"
-                f"drawtext=fontfile={font_path}:text='{hook_text}':fontcolor=black:fontsize=42:"
-                f"box=1:boxcolor=yellow@0.95:boxborderw=18:x=(w-text_w)/2:y=735,"
-                f"ass={ass_file}"
-            )
-            
-            # -t 58 ile maksimum 58 saniyeye kirpar (YouTube Shorts garantisi)
-            subprocess.run([
-                "ffmpeg", "-y", "-i", raw_file, "-t", "58",
-                "-vf", vf_filter,
-                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "24", "-c:a", "aac", filename
-            ], check=True)
-            
-            for attempt in range(3):
-                try:
-                    upload_to_drive(drive, filename, FOLDER_ID)
-                    print(f"Drive'a yuklendi: {filename}")
-                    break
-                except Exception as e:
-                    print(f"Drive tekrar deneniyor ({attempt+1}/3): {e}")
-                    time.sleep(3)
-                    drive = build("drive", "v3", credentials=get_creds(GDRIVE_REFRESH_TOKEN))
-            
-            try:
-                upload_to_youtube(youtube, filename, lang=lang, broadcaster=broadcaster)
-            except Exception as e:
-                print(f"YouTube kotasi dolu veya atlandi: {e}")
+    kick_done = False
+    for clip in kick_clips:
+        if process_clip(clip, drive, youtube, existing, whisper_model):
+            kick_done = True
+            break
 
-            uploaded += 1
-        except Exception as e:
-            print(f"Klip islenirken hata olustu ({broadcaster}), siradakine geciliyor: {e}")
-        finally:
-            for temp in (raw_file, ass_file, filename):
-                if os.path.exists(temp):
-                    os.remove(temp)
+    # Eğer bir platformda yeni klip yoksa diğer platformdan 1 tane daha tamamla
+    if not twitch_done:
+        for clip in kick_clips:
+            if process_clip(clip, drive, youtube, existing, whisper_model):
+                break
+    elif not kick_done:
+        for clip in twitch_clips:
+            if process_clip(clip, drive, youtube, existing, whisper_model):
+                break
 
 if __name__ == "__main__":
     main()
