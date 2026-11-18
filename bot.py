@@ -44,6 +44,12 @@ TWITCH_PRIORITY_STREAMERS = [
     "summit1g"
 ]
 
+# Kendi yayınında yerleşik canlı altyazı kullanan yayıncılar
+BUILTIN_SUB_STREAMERS = {
+    "caseoh_",
+    "caseoh"
+}
+
 BLACKLIST_CHANNELS = {
     "trailer_kanal_adi_1",
     "trailer_kanal_adi_2"
@@ -78,6 +84,33 @@ def get_cascade(xml_name):
     if hasattr(cv2, "objdetect") and hasattr(cv2.objdetect, "CascadeClassifier"):
         return cv2.objdetect.CascadeClassifier(xml_path)
     return None
+
+def has_embedded_subtitles(video_path, broadcaster=""):
+    """Videonun alt orta şeridinde yayıncının kendi gömülü altyazısı var mı kontrol eder."""
+    if broadcaster.lower() in BUILTIN_SUB_STREAMERS:
+        return True
+    cap = cv2.VideoCapture(video_path)
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    vw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    vh = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    if total_frames <= 0 or vw <= 0 or vh <= 0:
+        cap.release()
+        return False
+
+    text_like_frames = 0
+    for i in [2, 5, 8]:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, int(total_frames * (i / 10.0)))
+        ret, frame = cap.read()
+        if not ret:
+            continue
+        roi = frame[int(vh * 0.80):int(vh * 0.95), int(vw * 0.30):int(vw * 0.70)]
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        edges = cv2.Canny(gray, 150, 300)
+        edge_density = edges.mean() / 255.0
+        if 0.04 < edge_density < 0.25:
+            text_like_frames += 1
+    cap.release()
+    return text_like_frames >= 2
 
 def detect_webcam_box(video_path, broadcaster=""):
     """Yayıncı kamerasını kafaları kesmeden tam ortalayarak bulur."""
@@ -144,7 +177,6 @@ def detect_webcam_box(video_path, broadcaster=""):
         print(f"Yuz tarama hatasi ({e})")
         cap.release()
 
-    # Global yayıncıların (Kai, Speed vb.) çoğu sol üst veya sol orta kullanır
     return (box_w, box_h, 0, int(vh * 0.12)), "left"
 
 def censor_text(text):
@@ -213,7 +245,7 @@ def get_kick_clips():
     scraper = cloudscraper.create_scraper(browser={'browser': 'chrome', 'platform': 'windows', 'desktop': True})
     kick_list = []
     streamers = KICK_STREAMERS.copy()
-    random.shuffle(streamers)  # Her seferinde farklı Kick yayıncısı ilk sıraya gelsin
+    random.shuffle(streamers)
     
     tr_streamers = {"rraenee", "elraenn", "kendinemuzisyen", "wtcn", "mithrain"}
     
@@ -224,7 +256,7 @@ def get_kick_clips():
             if r.status_code != 200:
                 continue
             data = r.json().get("clips", [])
-            for c in data[:2]:  # Her yayıncıdan en fazla 2 taze klip al
+            for c in data[:2]:
                 video_url = c.get("clip_url") or c.get("video_url")
                 if not video_url:
                     continue
@@ -253,7 +285,6 @@ def get_twitch_clips():
     twitch_list = []
     started_at = (datetime.now(timezone.utc) - timedelta(hours=6)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    # 1. Öncelikli büyük yayıncıları (Kai Cenat, Speed vb.) doğrudan tara
     r_users = requests.get("https://api.twitch.tv/helix/users", headers=headers, params={"login": TWITCH_PRIORITY_STREAMERS})
     for u in r_users.json().get("data", []):
         r_uclips = requests.get("https://api.twitch.tv/helix/clips", headers=headers, params={
@@ -271,7 +302,6 @@ def get_twitch_clips():
                 "platform": "twitch"
             })
 
-    # 2. Genel GTA VI kategorisindeki popüler klipleri tara
     r_game = requests.get("https://api.twitch.tv/helix/games", headers=headers, params={"name": "Grand Theft Auto VI"})
     data = r_game.json().get("data", [])
     if data:
@@ -374,18 +404,23 @@ def process_clip(clip, drive, youtube, existing, whisper_model):
     try:
         subprocess.run(["yt-dlp", "-o", raw_file, clip["url"]], check=True)
         lang = clip["lang"]
-        generate_shorts_subtitles(raw_file, ass_file, whisper_model, lang=lang)
+        
+        use_subs = not has_embedded_subtitles(raw_file, broadcaster)
+        if use_subs:
+            generate_shorts_subtitles(raw_file, ass_file, whisper_model, lang=lang)
+            sub_filter = f",ass={ass_file}"
+        else:
+            print(f"{broadcaster} kendi altyazisina sahip -> Ek altyazi kapatildi")
+            sub_filter = ""
         
         (cw, ch, cx, cy), cam_side = detect_webcam_box(raw_file, broadcaster)
         game_crop_x = "(iw-1080)/3" if cam_side == "right" else "2*(iw-1080)/3"
         
-        # Sarı kanca kutusu kaldırıldı -> Temiz Split-Screen + Altyazı
         vf_filter = (
             f"split[cam][game];"
             f"[cam]crop={cw}:{ch}:{cx}:{cy},scale=1080:760[top];"
             f"[game]scale=-1:1160,crop=1080:1160:{game_crop_x}:0[bottom];"
-            f"[top][bottom]vstack=inputs=2,"
-            f"ass={ass_file}"
+            f"[top][bottom]vstack=inputs=2{sub_filter}"
         )
         
         subprocess.run([
@@ -428,7 +463,6 @@ def main():
     existing = get_existing_files(drive)
     whisper_model = WhisperModel("base", device="cpu", compute_type="int8")
 
-    # 1 klip Twitch'ten (Kai Cenat, Speed vb. dahil), 1 klip Kick'ten dengeli al
     twitch_done = False
     for clip in twitch_clips:
         if process_clip(clip, drive, youtube, existing, whisper_model):
@@ -441,7 +475,6 @@ def main():
             kick_done = True
             break
 
-    # Eğer bir platformda yeni klip yoksa diğer platformdan 1 tane daha tamamla
     if not twitch_done:
         for clip in kick_clips:
             if process_clip(clip, drive, youtube, existing, whisper_model):
