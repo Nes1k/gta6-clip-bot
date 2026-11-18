@@ -80,8 +80,8 @@ def get_cascade(xml_name):
         return cv2.objdetect.CascadeClassifier(xml_path)
     return None
 
-def detect_webcam_box(video_path):
-    """Ön yüz ve yan profil taramasıyla yayıncı kamerasını bulur; bulamazsa sol alt köşeyi alır."""
+def detect_webcam_box(video_path, broadcaster=""):
+    """Yayıncı kamerasını kenar şeritlerinde arar; GTA minimap'ini (sol alt) asla seçmez."""
     cap = cv2.VideoCapture(video_path)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     vw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -89,61 +89,71 @@ def detect_webcam_box(video_path):
     
     if total_frames <= 0 or vw <= 0 or vh <= 0:
         cap.release()
-        return (540, 380, 0, 700)
+        return (540, 380, 1380, 340), "right"
 
-    box_h = int(vh * 0.36)
+    # Üst panel (1080x760) için ideal kamera kutu ölçüsü
+    box_h = int(vh * 0.34)
     box_w = int(box_h * (1080 / 760))
+
+    # Bilinen Türk yayıncıların standart kamera konumları (1920x1080 oranlı)
+    b_low = broadcaster.lower()
+    if b_low == "rraenee":
+        cap.release()
+        # Rraenee kamerayı sağ ortaya koyar
+        return (box_w, box_h, vw - box_w, int(vh * 0.31)), "right"
 
     try:
         frontal_cascade = get_cascade("haarcascade_frontalface_default.xml")
         profile_cascade = get_cascade("haarcascade_profileface.xml")
         
-        if frontal_cascade is None:
-            cap.release()
-            return (box_w, box_h, 0, vh - box_h)
+        if frontal_cascade is not None:
+            left_hits = []
+            right_hits = []
 
-        corner_hits = {"top_left": [], "bottom_left": [], "top_right": [], "bottom_right": []}
-
-        for i in [2, 5, 8, 11]:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, int(total_frames * (i / 13.0)))
-            ret, frame = cap.read()
-            if not ret:
-                continue
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            
-            faces = list(frontal_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=3, minSize=(25, 25)))
-            if not faces and profile_cascade is not None:
-                faces = list(profile_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=3, minSize=(25, 25)))
+            for i in [2, 4, 6, 8, 10]:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, int(total_frames * (i / 12.0)))
+                ret, frame = cap.read()
+                if not ret:
+                    continue
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                 
-            for (x, y, w, h) in faces:
-                cx, cy = x + w // 2, y + h // 2
-                if cx < vw * 0.38:
-                    if cy < vh * 0.5:
-                        corner_hits["top_left"].append((x, y, w, h))
-                    else:
-                        corner_hits["bottom_left"].append((x, y, w, h))
-                elif cx > vw * 0.62:
-                    if cy < vh * 0.5:
-                        corner_hits["top_right"].append((x, y, w, h))
-                    else:
-                        corner_hits["bottom_right"].append((x, y, w, h))
+                faces = list(frontal_cascade.detectMultiScale(gray, scaleFactor=1.08, minNeighbors=2, minSize=(20, 20)))
+                if not faces and profile_cascade is not None:
+                    faces = list(profile_cascade.detectMultiScale(gray, scaleFactor=1.08, minNeighbors=2, minSize=(20, 20)))
+                    
+                for (x, y, w, h) in faces:
+                    cx, cy = x + w // 2, y + h // 2
+                    # Sol alt köşedeki GTA minimap bölgesini (x < %28 ve y > %68) hariç tut!
+                    if cx < vw * 0.28 and cy > vh * 0.68:
+                        continue
+                    if cx < vw * 0.30:
+                        left_hits.append((x, y, w, h))
+                    elif cx > vw * 0.70:
+                        right_hits.append((x, y, w, h))
 
-        cap.release()
+            cap.release()
 
-        best_corner = max(corner_hits, key=lambda k: len(corner_hits[k]))
-        if len(corner_hits[best_corner]) > 0:
-            avg_cx = sum(b[0] + b[2] // 2 for b in corner_hits[best_corner]) // len(corner_hits[best_corner])
-            avg_cy = sum(b[1] + b[3] // 2 for b in corner_hits[best_corner]) // len(corner_hits[best_corner])
-            crop_x = max(0, min(vw - box_w, avg_cx - box_w // 2))
-            crop_y = max(0, min(vh - box_h, avg_cy - box_h // 2))
-            print(f"Webcam bolgesi tespit edildi ({best_corner}): {box_w}x{box_h} @ ({crop_x},{crop_y})")
-            return (box_w, box_h, crop_x, crop_y)
+            if len(right_hits) >= len(left_hits) and len(right_hits) > 0:
+                avg_cx = sum(b[0] + b[2] // 2 for b in right_hits) // len(right_hits)
+                avg_cy = sum(b[1] + b[3] // 2 for b in right_hits) // len(right_hits)
+                crop_x = max(0, min(vw - box_w, avg_cx - box_w // 2))
+                crop_y = max(0, min(vh - box_h, avg_cy - box_h // 2))
+                print(f"Webcam sag tarafta bulundu: {box_w}x{box_h} @ ({crop_x},{crop_y})")
+                return (box_w, box_h, crop_x, crop_y), "right"
+            elif len(left_hits) > 0:
+                avg_cx = sum(b[0] + b[2] // 2 for b in left_hits) // len(left_hits)
+                avg_cy = sum(b[1] + b[3] // 2 for b in left_hits) // len(left_hits)
+                crop_x = max(0, min(vw - box_w, avg_cx - box_w // 2))
+                crop_y = max(0, min(vh - box_h, avg_cy - box_h // 2))
+                print(f"Webcam sol tarafta bulundu: {box_w}x{box_h} @ ({crop_x},{crop_y})")
+                return (box_w, box_h, crop_x, crop_y), "left"
     except Exception as e:
-        print(f"Yuz tarama atlandi ({e}) -> Varsayilan Sol Alt Webcam kullaniliyor")
+        print(f"Yuz tarama hatasi ({e})")
         cap.release()
 
-    print("Yuz algilanamadi -> Varsayilan Sol Alt Webcam alani kullaniliyor")
-    return (box_w, box_h, 0, vh - box_h)
+    # Hiç yüz bulunamazsa minimap olan sol alt yerine sağ orta kamera bölgesini al
+    print("Varsayilan Sag Orta Webcam alani kullaniliyor")
+    return (box_w, box_h, vw - box_w, int(vh * 0.32)), "right"
 
 def censor_text(text):
     words = text.split()
@@ -365,12 +375,15 @@ def main():
             hook_text = random.choice(HOOK_TITLES_TR if lang == "tr" else HOOK_TITLES_EN)
             font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
             
-            cw, ch, cx, cy = detect_webcam_box(raw_file)
+            (cw, ch, cx, cy), cam_side = detect_webcam_box(raw_file, broadcaster)
+            
+            # Kamera sağdaysa alttaki oyunu biraz sola kaydır ki altta kameranın yarısı görünmesin
+            game_crop_x = "(iw-1080)/3" if cam_side == "right" else "2*(iw-1080)/3"
             
             vf_filter = (
                 f"split[cam][game];"
                 f"[cam]crop={cw}:{ch}:{cx}:{cy},scale=1080:760[top];"
-                f"[game]scale=-1:1160,crop=1080:1160:(iw-1080)/2:0[bottom];"
+                f"[game]scale=-1:1160,crop=1080:1160:{game_crop_x}:0[bottom];"
                 f"[top][bottom]vstack=inputs=2,"
                 f"drawtext=fontfile={font_path}:text='{hook_text}':fontcolor=black:fontsize=42:"
                 f"box=1:boxcolor=yellow@0.95:boxborderw=18:x=(w-text_w)/2:y=735,"
