@@ -24,7 +24,6 @@ BLACKLIST_CHANNELS = {
     "trailer_kanal_adi_2"
 }
 
-# Başlığında bu kelimeler geçen sahte/modlu GTA 5 kliplerini atla
 SKIP_KEYWORDS = ["trailer", "fivem", "gta 5", "gtav", "mod", "roleplay", "rp"]
 
 HOOK_TITLES = [
@@ -32,7 +31,8 @@ HOOK_TITLES = [
     "ROCKSTAR THOUGHT OF EVERYTHING!",
     "THIS GTA 6 DETAIL IS INSANE!",
     "NEXT-GEN PHYSICS IN GTA VI!",
-    "WAIT FOR IT... GTA 6 IS WILD!"
+    "WAIT FOR IT... GTA 6 IS WILD!",
+    "GTA 6 IS ACTUALLY CRAZY!"
 ]
 
 YT_TITLES = [
@@ -135,6 +135,7 @@ def get_creds(refresh_token):
 def get_existing_files(drive_service):
     results = drive_service.files().list(
         q=f"'{FOLDER_ID}' in parents and trashed=false",
+        pageSize=1000,
         fields="files(name)"
     ).execute()
     return {f["name"] for f in results.get("files", [])}
@@ -174,13 +175,17 @@ def main():
     token = get_twitch_token()
     headers = {"Client-ID": TWITCH_CLIENT_ID, "Authorization": f"Bearer {token}"}
     
-    game_id = get_game_id(headers, "Grand Theft Auto VI") or get_game_id(headers, "Just Chatting")
+    game_id = get_game_id(headers, "Grand Theft Auto VI")
+    if not game_id:
+        print("GTA 6 Game ID bulunamadi!")
+        return
     
-    started_at = (datetime.now(timezone.utc) - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    # Son 1 saatin en cok izlenen 50 klibini tara
+    started_at = (datetime.now(timezone.utc) - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
     r = requests.get("https://api.twitch.tv/helix/clips", headers=headers, params={
         "game_id": game_id,
         "started_at": started_at,
-        "first": 30
+        "first": 50
     })
     clips = r.json().get("data", [])
     
@@ -192,11 +197,15 @@ def main():
     uploaded = 0
 
     for clip in clips:
-        if uploaded >= 2:
+        # Her 10 dakikada bir maksimum 4 klip uret
+        if uploaded >= 4:
             break
             
-        # Sadece İngilizce yayınları al (Fransızca/İspanyolca vb. elenir)
         if clip.get("language") != "en":
+            continue
+
+        # En az 10 izlenmesi olan kaliteli klipleri sec
+        if clip.get("view_count", 0) < 10:
             continue
 
         broadcaster = clip["broadcaster_name"]
@@ -255,7 +264,7 @@ def main():
         try:
             upload_to_youtube(youtube, filename)
         except Exception as e:
-            print(f"YOUTUBE HATA DETAYI: {e}")
+            print(f"YouTube kotasi dolu veya atlandi: {e}")
 
         uploaded += 1
         for temp in (raw_file, ass_file, filename):
