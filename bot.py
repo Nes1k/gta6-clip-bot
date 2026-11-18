@@ -72,6 +72,14 @@ BAD_ROOTS = [
     "amk", "aq", "sik", "orospu", "piç", "yarrak", "göt", "kahpe", "ibne"
 ]
 
+def get_cascade(xml_name):
+    xml_path = os.path.join(cv2.data.haarcascades, xml_name)
+    if hasattr(cv2, "CascadeClassifier"):
+        return cv2.CascadeClassifier(xml_path)
+    if hasattr(cv2, "objdetect") and hasattr(cv2.objdetect, "CascadeClassifier"):
+        return cv2.objdetect.CascadeClassifier(xml_path)
+    return None
+
 def detect_webcam_box(video_path):
     """Ön yüz ve yan profil taramasıyla yayıncı kamerasını bulur; bulamazsa sol alt köşeyi alır."""
     cap = cv2.VideoCapture(video_path)
@@ -83,49 +91,56 @@ def detect_webcam_box(video_path):
         cap.release()
         return (540, 380, 0, 700)
 
-    frontal_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
-    profile_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_profileface.xml")
-    
-    corner_hits = {"top_left": [], "bottom_left": [], "top_right": [], "bottom_right": []}
-
-    # Hızlı tarama için videonun 4 farklı noktasını kontrol et
-    for i in [2, 5, 8, 11]:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, int(total_frames * (i / 13.0)))
-        ret, frame = cap.read()
-        if not ret:
-            continue
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        
-        faces = list(frontal_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=3, minSize=(25, 25)))
-        if not faces:
-            faces = list(profile_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=3, minSize=(25, 25)))
-            
-        for (x, y, w, h) in faces:
-            cx, cy = x + w // 2, y + h // 2
-            if cx < vw * 0.38:
-                if cy < vh * 0.5:
-                    corner_hits["top_left"].append((x, y, w, h))
-                else:
-                    corner_hits["bottom_left"].append((x, y, w, h))
-            elif cx > vw * 0.62:
-                if cy < vh * 0.5:
-                    corner_hits["top_right"].append((x, y, w, h))
-                else:
-                    corner_hits["bottom_right"].append((x, y, w, h))
-
-    cap.release()
-
     box_h = int(vh * 0.36)
     box_w = int(box_h * (1080 / 760))
 
-    best_corner = max(corner_hits, key=lambda k: len(corner_hits[k]))
-    if len(corner_hits[best_corner]) > 0:
-        avg_cx = sum(b[0] + b[2] // 2 for b in corner_hits[best_corner]) // len(corner_hits[best_corner])
-        avg_cy = sum(b[1] + b[3] // 2 for b in corner_hits[best_corner]) // len(corner_hits[best_corner])
-        crop_x = max(0, min(vw - box_w, avg_cx - box_w // 2))
-        crop_y = max(0, min(vh - box_h, avg_cy - box_h // 2))
-        print(f"Webcam bolgesi tespit edildi ({best_corner}): {box_w}x{box_h} @ ({crop_x},{crop_y})")
-        return (box_w, box_h, crop_x, crop_y)
+    try:
+        frontal_cascade = get_cascade("haarcascade_frontalface_default.xml")
+        profile_cascade = get_cascade("haarcascade_profileface.xml")
+        
+        if frontal_cascade is None:
+            cap.release()
+            return (box_w, box_h, 0, vh - box_h)
+
+        corner_hits = {"top_left": [], "bottom_left": [], "top_right": [], "bottom_right": []}
+
+        for i in [2, 5, 8, 11]:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, int(total_frames * (i / 13.0)))
+            ret, frame = cap.read()
+            if not ret:
+                continue
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            
+            faces = list(frontal_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=3, minSize=(25, 25)))
+            if not faces and profile_cascade is not None:
+                faces = list(profile_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=3, minSize=(25, 25)))
+                
+            for (x, y, w, h) in faces:
+                cx, cy = x + w // 2, y + h // 2
+                if cx < vw * 0.38:
+                    if cy < vh * 0.5:
+                        corner_hits["top_left"].append((x, y, w, h))
+                    else:
+                        corner_hits["bottom_left"].append((x, y, w, h))
+                elif cx > vw * 0.62:
+                    if cy < vh * 0.5:
+                        corner_hits["top_right"].append((x, y, w, h))
+                    else:
+                        corner_hits["bottom_right"].append((x, y, w, h))
+
+        cap.release()
+
+        best_corner = max(corner_hits, key=lambda k: len(corner_hits[k]))
+        if len(corner_hits[best_corner]) > 0:
+            avg_cx = sum(b[0] + b[2] // 2 for b in corner_hits[best_corner]) // len(corner_hits[best_corner])
+            avg_cy = sum(b[1] + b[3] // 2 for b in corner_hits[best_corner]) // len(corner_hits[best_corner])
+            crop_x = max(0, min(vw - box_w, avg_cx - box_w // 2))
+            crop_y = max(0, min(vh - box_h, avg_cy - box_h // 2))
+            print(f"Webcam bolgesi tespit edildi ({best_corner}): {box_w}x{box_h} @ ({crop_x},{crop_y})")
+            return (box_w, box_h, crop_x, crop_y)
+    except Exception as e:
+        print(f"Yuz tarama atlandi ({e}) -> Varsayilan Sol Alt Webcam kullaniliyor")
+        cap.release()
 
     print("Yuz algilanamadi -> Varsayilan Sol Alt Webcam alani kullaniliyor")
     return (box_w, box_h, 0, vh - box_h)
@@ -344,53 +359,52 @@ def main():
         
         try:
             subprocess.run(["yt-dlp", "-o", raw_file, clip["url"]], check=True)
-        except Exception as e:
-            print(f"Video indirilemedi ({broadcaster}): {e}")
-            continue
-
-        lang = clip["lang"]
-        generate_shorts_subtitles(raw_file, ass_file, whisper_model, lang=lang)
-        
-        hook_text = random.choice(HOOK_TITLES_TR if lang == "tr" else HOOK_TITLES_EN)
-        font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-        
-        cw, ch, cx, cy = detect_webcam_box(raw_file)
-        
-        vf_filter = (
-            f"split[cam][game];"
-            f"[cam]crop={cw}:{ch}:{cx}:{cy},scale=1080:760[top];"
-            f"[game]scale=-1:1160,crop=1080:1160:(iw-1080)/2:0[bottom];"
-            f"[top][bottom]vstack=inputs=2,"
-            f"drawtext=fontfile={font_path}:text='{hook_text}':fontcolor=black:fontsize=42:"
-            f"box=1:boxcolor=yellow@0.95:boxborderw=18:x=(w-text_w)/2:y=735,"
-            f"ass={ass_file}"
-        )
-        
-        subprocess.run([
-            "ffmpeg", "-y", "-i", raw_file,
-            "-vf", vf_filter,
-            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "24", "-c:a", "aac", filename
-        ], check=True)
-        
-        for attempt in range(3):
+            lang = clip["lang"]
+            generate_shorts_subtitles(raw_file, ass_file, whisper_model, lang=lang)
+            
+            hook_text = random.choice(HOOK_TITLES_TR if lang == "tr" else HOOK_TITLES_EN)
+            font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+            
+            cw, ch, cx, cy = detect_webcam_box(raw_file)
+            
+            vf_filter = (
+                f"split[cam][game];"
+                f"[cam]crop={cw}:{ch}:{cx}:{cy},scale=1080:760[top];"
+                f"[game]scale=-1:1160,crop=1080:1160:(iw-1080)/2:0[bottom];"
+                f"[top][bottom]vstack=inputs=2,"
+                f"drawtext=fontfile={font_path}:text='{hook_text}':fontcolor=black:fontsize=42:"
+                f"box=1:boxcolor=yellow@0.95:boxborderw=18:x=(w-text_w)/2:y=735,"
+                f"ass={ass_file}"
+            )
+            
+            subprocess.run([
+                "ffmpeg", "-y", "-i", raw_file,
+                "-vf", vf_filter,
+                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "24", "-c:a", "aac", filename
+            ], check=True)
+            
+            for attempt in range(3):
+                try:
+                    upload_to_drive(drive, filename, FOLDER_ID)
+                    print(f"Drive'a yuklendi: {filename}")
+                    break
+                except Exception as e:
+                    print(f"Drive tekrar deneniyor ({attempt+1}/3): {e}")
+                    time.sleep(3)
+                    drive = build("drive", "v3", credentials=get_creds(GDRIVE_REFRESH_TOKEN))
+            
             try:
-                upload_to_drive(drive, filename, FOLDER_ID)
-                print(f"Drive'a yuklendi: {filename}")
-                break
+                upload_to_youtube(youtube, filename, lang=lang, broadcaster=broadcaster)
             except Exception as e:
-                print(f"Drive tekrar deneniyor ({attempt+1}/3): {e}")
-                time.sleep(3)
-                drive = build("drive", "v3", credentials=get_creds(GDRIVE_REFRESH_TOKEN))
-        
-        try:
-            upload_to_youtube(youtube, filename, lang=lang, broadcaster=broadcaster)
-        except Exception as e:
-            print(f"YouTube kotasi dolu veya atlandi: {e}")
+                print(f"YouTube kotasi dolu veya atlandi: {e}")
 
-        uploaded += 1
-        for temp in (raw_file, ass_file, filename):
-            if os.path.exists(temp):
-                os.remove(temp)
+            uploaded += 1
+        except Exception as e:
+            print(f"Klip islenirken hata olustu ({broadcaster}), siradakine geciliyor: {e}")
+        finally:
+            for temp in (raw_file, ass_file, filename):
+                if os.path.exists(temp):
+                    os.remove(temp)
 
 if __name__ == "__main__":
     main()
