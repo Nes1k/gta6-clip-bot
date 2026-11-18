@@ -1,5 +1,6 @@
 import os
 import re
+import cv2
 import time
 import random
 import subprocess
@@ -20,7 +21,6 @@ GDRIVE_CLIENT_SECRET = os.environ["GDRIVE_CLIENT_SECRET"]
 GDRIVE_REFRESH_TOKEN = os.environ["GDRIVE_REFRESH_TOKEN"]
 YT_REFRESH_TOKEN = os.environ["YT_REFRESH_TOKEN"]
 
-# Takip edilecek Türk Kick yayıncıları (Kullanıcı adlarını küçük harfle yaz)
 KICK_STREAMERS = [
     "rraenee",
     "elraenn",
@@ -72,6 +72,52 @@ BAD_ROOTS = [
     "amk", "aq", "sik", "orospu", "piç", "yarrak", "göt", "kahpe", "ibne"
 ]
 
+def detect_webcam_box(video_path):
+    """Videoda yayıncı yüzünü otomatik algılar ve üst panel için kırpma koordinatı döner."""
+    cap = cv2.VideoCapture(video_path)
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    vw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    vh = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    
+    if total_frames <= 0 or vw <= 0 or vh <= 0:
+        cap.release()
+        return None
+
+    face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+    detected_faces = []
+
+    # Videonun 5 farklı noktasından kare alıp yüz ara
+    for ratio in [0.15, 0.35, 0.50, 0.70, 0.85]:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, int(total_frames * ratio))
+        ret, frame = cap.read()
+        if not ret:
+            continue
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        faces = face_cascade.detectMultiScale(gray, scaleFactor=1.15, minNeighbors=6, minSize=(45, 45))
+        for (x, y, w, h) in faces:
+            detected_faces.append((x, y, w, h))
+            
+    cap.release()
+    if not detected_faces:
+        return None
+
+    # En sık/büyük tespit edilen yüzün merkezini al
+    fx, fy, fw, fh = max(detected_faces, key=lambda b: b[2] * b[3])
+    cx = fx + fw // 2
+    cy = fy + fh // 2
+
+    # Üst panel oranı (1080x760 -> ~1.42 en-boy oranı) için geniş webcam kutusu hesapla
+    box_h = max(int(vh * 0.38), int(fh * 2.8))
+    box_h = min(box_h, vh)
+    box_w = int(box_h * (1080 / 760))
+    if box_w > vw:
+        box_w = vw
+        box_h = int(box_w * (760 / 1080))
+
+    crop_x = max(0, min(vw - box_w, cx - box_w // 2))
+    crop_y = max(0, min(vh - box_h, cy - box_h // 2))
+    return (crop_w := box_w, crop_h := box_h, crop_x, crop_y)
+
 def censor_text(text):
     words = text.split()
     cleaned = []
@@ -99,7 +145,6 @@ def generate_shorts_subtitles(video_path, ass_path, model, lang="en"):
         vad_parameters=dict(min_silence_duration_ms=400)
     )
     
-    # MarginV=510 olarak güncellendi (Sıfır kırpma modunda videonun hemen altına tam oturur)
     ass_header = """[Script Info]
 ScriptType: v4.00+
 PlayResX: 1080
@@ -107,7 +152,7 @@ PlayResY: 1920
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: ShortsStyle,DejaVu Sans,72,&H0000FFFF,&H00FFFFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,6,2,2,60,60,510,1
+Style: ShortsStyle,DejaVu Sans,72,&H0000FFFF,&H00FFFFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,6,2,2,60,60,360,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -297,19 +342,32 @@ def main():
         hook_text = random.choice(HOOK_TITLES_TR if lang == "tr" else HOOK_TITLES_EN)
         font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
         
-        # Yöntem 1: Sıfır kırpma (scale=1080:-1) ile tüm ekran ve webcamler görünür
-        vf_filter = (
-            f"split[original][copy];"
-            f"[copy]scale=1080:1920:force_original_aspect_ratio=increase,"
-            f"crop=1080:1920,boxblur=25:12,eq=brightness=-0.15[blurred];"
-            f"[original]scale=1080:-1[scaled];"
-            f"[blurred][scaled]overlay=0:(H-h)/2,"
-            f"drawtext=fontfile={font_path}:text='{hook_text}':fontcolor=black:fontsize=46:"
-            f"box=1:boxcolor=yellow@0.95:boxborderw=22:x=(w-text_w)/2:y=380,"
-            f"drawtext=fontfile={font_path}:text='GTA VI • CLIPS':fontcolor=white@0.85:fontsize=34:"
-            f"x=(w-text_w)/2:y=1520,"
-            f"ass={ass_file}"
-        )
+        cam_box = detect_webcam_box(raw_file)
+        if cam_box:
+            cw, ch, cx, cy = cam_box
+            print(f"Kamera tespit edildi ({broadcaster}): {cw}x{ch} @ ({cx},{cy}) -> Split-Screen aktif")
+            # Üstte büyük webcam (1080x760), altta yakınlaştırılmış oyun (1080x1160)
+            vf_filter = (
+                f"split[cam][game];"
+                f"[cam]crop={cw}:{ch}:{cx}:{cy},scale=1080:760[top];"
+                f"[game]scale=-1:1160,crop=1080:1160:(iw-1080)/2:0[bottom];"
+                f"[top][bottom]vstack=inputs=2,"
+                f"drawtext=fontfile={font_path}:text='{hook_text}':fontcolor=black:fontsize=42:"
+                f"box=1:boxcolor=yellow@0.95:boxborderw=18:x=(w-text_w)/2:y=735,"
+                f"ass={ass_file}"
+            )
+        else:
+            print(f"Kamera bulunamadi ({broadcaster}) -> Tam ekran oyun modu")
+            vf_filter = (
+                f"split[original][copy];"
+                f"[copy]scale=1080:1920:force_original_aspect_ratio=increase,"
+                f"crop=1080:1920,boxblur=25:12,eq=brightness=-0.15[blurred];"
+                f"[original]scale=1080:-1[scaled];"
+                f"[blurred][scaled]overlay=0:(H-h)/2,"
+                f"drawtext=fontfile={font_path}:text='{hook_text}':fontcolor=black:fontsize=46:"
+                f"box=1:boxcolor=yellow@0.95:boxborderw=22:x=(w-text_w)/2:y=380,"
+                f"ass={ass_file}"
+            )
         
         subprocess.run([
             "ffmpeg", "-y", "-i", raw_file,
