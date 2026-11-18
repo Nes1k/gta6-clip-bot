@@ -81,7 +81,7 @@ def get_cascade(xml_name):
     return None
 
 def detect_webcam_box(video_path, broadcaster=""):
-    """Yayıncı kamerasını kenar şeritlerinde arar; GTA minimap'ini (sol alt) asla seçmez."""
+    """Yayıncı kamerasını kafaları kesmeden tam ortalayarak bulur."""
     cap = cv2.VideoCapture(video_path)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     vw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -89,18 +89,17 @@ def detect_webcam_box(video_path, broadcaster=""):
     
     if total_frames <= 0 or vw <= 0 or vh <= 0:
         cap.release()
-        return (540, 380, 1380, 340), "right"
+        return (600, 420, 1320, 260), "right"
 
-    # Üst panel (1080x760) için ideal kamera kutu ölçüsü
-    box_h = int(vh * 0.34)
+    # Üst panel (1080x760) için biraz daha geniş kutu (ekip kameralarını da kapsar)
+    box_h = int(vh * 0.36)
     box_w = int(box_h * (1080 / 760))
 
-    # Bilinen Türk yayıncıların standart kamera konumları (1920x1080 oranlı)
     b_low = broadcaster.lower()
     if b_low == "rraenee":
         cap.release()
-        # Rraenee kamerayı sağ ortaya koyar
-        return (box_w, box_h, vw - box_w, int(vh * 0.31)), "right"
+        # Kafalar kesilmesin diye y eksenini yukarı çektik (0.31 -> 0.24)
+        return (box_w, box_h, vw - box_w, int(vh * 0.24)), "right"
 
     try:
         frontal_cascade = get_cascade("haarcascade_frontalface_default.xml")
@@ -123,12 +122,11 @@ def detect_webcam_box(video_path, broadcaster=""):
                     
                 for (x, y, w, h) in faces:
                     cx, cy = x + w // 2, y + h // 2
-                    # Sol alt köşedeki GTA minimap bölgesini (x < %28 ve y > %68) hariç tut!
                     if cx < vw * 0.28 and cy > vh * 0.68:
                         continue
-                    if cx < vw * 0.30:
+                    if cx < vw * 0.32:
                         left_hits.append((x, y, w, h))
-                    elif cx > vw * 0.70:
+                    elif cx > vw * 0.68:
                         right_hits.append((x, y, w, h))
 
             cap.release()
@@ -137,23 +135,20 @@ def detect_webcam_box(video_path, broadcaster=""):
                 avg_cx = sum(b[0] + b[2] // 2 for b in right_hits) // len(right_hits)
                 avg_cy = sum(b[1] + b[3] // 2 for b in right_hits) // len(right_hits)
                 crop_x = max(0, min(vw - box_w, avg_cx - box_w // 2))
-                crop_y = max(0, min(vh - box_h, avg_cy - box_h // 2))
-                print(f"Webcam sag tarafta bulundu: {box_w}x{box_h} @ ({crop_x},{crop_y})")
+                # Kafa payı (headroom) bırakmak için kutuyu biraz yukarı kaydır
+                crop_y = max(0, min(vh - box_h, avg_cy - int(box_h * 0.42)))
                 return (box_w, box_h, crop_x, crop_y), "right"
             elif len(left_hits) > 0:
                 avg_cx = sum(b[0] + b[2] // 2 for b in left_hits) // len(left_hits)
                 avg_cy = sum(b[1] + b[3] // 2 for b in left_hits) // len(left_hits)
                 crop_x = max(0, min(vw - box_w, avg_cx - box_w // 2))
-                crop_y = max(0, min(vh - box_h, avg_cy - box_h // 2))
-                print(f"Webcam sol tarafta bulundu: {box_w}x{box_h} @ ({crop_x},{crop_y})")
+                crop_y = max(0, min(vh - box_h, avg_cy - int(box_h * 0.42)))
                 return (box_w, box_h, crop_x, crop_y), "left"
     except Exception as e:
         print(f"Yuz tarama hatasi ({e})")
         cap.release()
 
-    # Hiç yüz bulunamazsa minimap olan sol alt yerine sağ orta kamera bölgesini al
-    print("Varsayilan Sag Orta Webcam alani kullaniliyor")
-    return (box_w, box_h, vw - box_w, int(vh * 0.32)), "right"
+    return (box_w, box_h, vw - box_w, int(vh * 0.25)), "right"
 
 def censor_text(text):
     words = text.split()
@@ -179,7 +174,8 @@ def generate_shorts_subtitles(video_path, ass_path, model, lang="en"):
         language=lang,
         word_timestamps=True,
         vad_filter=True,
-        vad_parameters=dict(min_silence_duration_ms=400)
+        no_speech_threshold=0.65,
+        vad_parameters=dict(min_silence_duration_ms=450)
     )
     
     ass_header = """[Script Info]
@@ -200,7 +196,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             continue
         chunk = []
         for word in segment.words:
-            if word.probability < 0.30:
+            if word.probability < 0.45:
                 continue
             chunk.append(word)
             if len(chunk) == 3 or word == segment.words[-1]:
@@ -224,7 +220,6 @@ def get_kick_clips():
             url = f"https://kick.com/api/v2/channels/{streamer}/clips?cursor=0&sort=date&time=day"
             r = scraper.get(url, timeout=15)
             if r.status_code != 200:
-                print(f"Kick ({streamer}) erisim durumu: {r.status_code}")
                 continue
             data = r.json().get("clips", [])
             for c in data[:3]:
@@ -376,8 +371,6 @@ def main():
             font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
             
             (cw, ch, cx, cy), cam_side = detect_webcam_box(raw_file, broadcaster)
-            
-            # Kamera sağdaysa alttaki oyunu biraz sola kaydır ki altta kameranın yarısı görünmesin
             game_crop_x = "(iw-1080)/3" if cam_side == "right" else "2*(iw-1080)/3"
             
             vf_filter = (
@@ -390,8 +383,9 @@ def main():
                 f"ass={ass_file}"
             )
             
+            # -t 58 ile maksimum 58 saniyeye kirpar (YouTube Shorts garantisi)
             subprocess.run([
-                "ffmpeg", "-y", "-i", raw_file,
+                "ffmpeg", "-y", "-i", raw_file, "-t", "58",
                 "-vf", vf_filter,
                 "-c:v", "libx264", "-preset", "ultrafast", "-crf", "24", "-c:a", "aac", filename
             ], check=True)
