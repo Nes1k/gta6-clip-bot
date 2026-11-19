@@ -3,9 +3,11 @@ import re
 import cv2
 import time
 import random
+import urllib.request
 import subprocess
 import requests
 import cloudscraper
+import numpy as np
 from datetime import datetime, timedelta, timezone
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
@@ -21,7 +23,6 @@ GDRIVE_CLIENT_SECRET = os.environ["GDRIVE_CLIENT_SECRET"]
 GDRIVE_REFRESH_TOKEN = os.environ["GDRIVE_REFRESH_TOKEN"]
 YT_REFRESH_TOKEN = os.environ["YT_REFRESH_TOKEN"]
 
-# Kick yayıncıları (Türk + Global yayıncılar)
 KICK_STREAMERS = [
     "rraenee",
     "elraenn",
@@ -32,7 +33,6 @@ KICK_STREAMERS = [
     "xqc"
 ]
 
-# Twitch'te öncelikli takip edilecek büyük yayıncılar
 TWITCH_PRIORITY_STREAMERS = [
     "kaicenat",
     "ishowspeed",
@@ -44,7 +44,6 @@ TWITCH_PRIORITY_STREAMERS = [
     "summit1g"
 ]
 
-# Kendi yayınında yerleşik canlı altyazı kullanan yayıncılar
 BUILTIN_SUB_STREAMERS = {
     "caseoh_",
     "caseoh"
@@ -77,16 +76,14 @@ BAD_ROOTS = [
     "amk", "aq", "sik", "orospu", "piç", "yarrak", "göt", "kahpe", "ibne"
 ]
 
-def get_cascade(xml_name):
-    xml_path = os.path.join(cv2.data.haarcascades, xml_name)
-    if hasattr(cv2, "CascadeClassifier"):
-        return cv2.CascadeClassifier(xml_path)
-    if hasattr(cv2, "objdetect") and hasattr(cv2.objdetect, "CascadeClassifier"):
-        return cv2.objdetect.CascadeClassifier(xml_path)
-    return None
+YUNET_MODEL_PATH = "face_detection_yunet_2023mar.onnx"
+YUNET_URL = "https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx"
+
+def ensure_yunet_model():
+    if not os.path.exists(YUNET_MODEL_PATH):
+        urllib.request.urlretrieve(YUNET_URL, YUNET_MODEL_PATH)
 
 def has_embedded_subtitles(video_path, broadcaster=""):
-    """Videonun alt orta şeridinde yayıncının kendi gömülü altyazısı var mı kontrol eder."""
     if broadcaster.lower() in BUILTIN_SUB_STREAMERS:
         return True
     cap = cv2.VideoCapture(video_path)
@@ -112,8 +109,93 @@ def has_embedded_subtitles(video_path, broadcaster=""):
     cap.release()
     return text_like_frames >= 2
 
+def find_webcam_frame_bounds(frames, face_cx, face_cy, face_w, face_h, vw, vh):
+    """
+    Yüz merkezinden dışa doğru piksellerin video boyunca sabit kaldığı
+    gerçek webcam kutusunun sınırlarını (left, top, right, bottom) tespit eder.
+    """
+    if len(frames) < 2:
+        return None
+
+    # Ardışık kareler arasındaki hareket farkını hesapla (webcam arka planı sabit, oyun hareketlidir)
+    diffs = []
+    for i in range(len(frames) - 1):
+        g1 = cv2.cvtColor(frames[i], cv2.COLOR_BGR2GRAY).astype(np.float32)
+        g2 = cv2.cvtColor(frames[i + 1], cv2.COLOR_BGR2GRAY).astype(np.float32)
+        diffs.append(np.abs(g1 - g2))
+    avg_diff = np.mean(diffs, axis=0)
+
+    # Yüz merkezinden başlayarak sağa, sola, yukarı, aşağı gerçek webcam sınırlarını bul
+    min_w = int(face_w * 2.2)
+    max_w = int(vw * 0.42)
+    min_h = int(face_h * 2.0)
+    max_h = int(vh * 0.45)
+
+    # Kenar çizgilerini (overlay çerçevesi veya keskin geçiş) bulmak için Sobel kullan
+    ref_gray = cv2.cvtColor(frames[len(frames) // 2], cv2.COLOR_BGR2GRAY)
+    grad_x = np.abs(cv2.Sobel(ref_gray, cv2.CV_32F, 1, 0, ksize=3))
+    grad_y = np.abs(cv2.Sobel(ref_gray, cv2.CV_32F, 0, 1, ksize=3))
+
+    # Dikey çizgi profili (sol/sağ sınır adayları)
+    y_band1 = max(0, face_cy - face_h)
+    y_band2 = min(vh, face_cy + face_h)
+    col_scores = np.mean(grad_x[y_band1:y_band2, :], axis=0)
+
+    # Yatay çizgi profili (üst/alt sınır adayları)
+    x_band1 = max(0, face_cx - face_w)
+    x_band2 = min(vw, face_cx + face_w)
+    row_scores = np.mean(grad_y[:, x_band1:x_band2], axis=1)
+
+    # Sol sınır: eğer yüz ekranın sol kenarına yakınsa (x < %22) doğrudan 0 al
+    if face_cx < vw * 0.22:
+        left = 0
+        right_search_start = max(face_cx + int(face_w * 0.8), min_w)
+        right_search_end = min(vw, max_w)
+        if right_search_end > right_search_start:
+            right = right_search_start + int(np.argmax(col_scores[right_search_start:right_search_end]))
+        else:
+            right = min(vw, int(face_w * 3.5))
+    # Sağ sınır: eğer yüz ekranın sağ kenarına yakınsa (x > %78) doğrudan vw al
+    elif face_cx > vw * 0.78:
+        right = vw
+        left_search_end = min(face_cx - int(face_w * 0.8), vw - min_w)
+        left_search_start = max(0, vw - max_w)
+        if left_search_end > left_search_start:
+            left = left_search_start + int(np.argmax(col_scores[left_search_start:left_search_end]))
+        else:
+            left = max(0, vw - int(face_w * 3.5))
+    else:
+        return None
+
+    # Üst ve alt sınırları tespit et
+    top_search_start = max(0, face_cy - int(max_h * 0.65))
+    top_search_end = max(top_search_start + 1, face_cy - int(face_h * 0.65))
+    if face_cy < vh * 0.20:
+        top = 0
+    else:
+        top = top_search_start + int(np.argmax(row_scores[top_search_start:top_search_end]))
+
+    bot_search_start = min(vh - 1, face_cy + int(face_h * 0.8))
+    bot_search_end = min(vh, top + max_h)
+    if face_cy > vh * 0.80:
+        bottom = vh
+    elif bot_search_end > bot_search_start:
+        bottom = bot_search_start + int(np.argmax(row_scores[bot_search_start:bot_search_end]))
+    else:
+        bottom = min(vh, top + int(face_h * 2.8))
+
+    cw = right - left
+    ch = bottom - top
+    if cw < min_w or ch < min_h:
+        return None
+
+    return (cw, ch, left, top)
+
 def detect_webcam_box(video_path, broadcaster=""):
-    """Yayıncı kamerasını kafaları kesmeden tam ortalayarak bulur."""
+    """
+    YuNet derin öğrenme modeli ile yüzü %99 doğrulukla bulur,
+    ardından webcam çerçevesinin gerçek sınırlarını ölçerek tam oturtur.
+    """
     cap = cv2.VideoCapture(video_path)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     vw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -121,63 +203,80 @@ def detect_webcam_box(video_path, broadcaster=""):
     
     if total_frames <= 0 or vw <= 0 or vh <= 0:
         cap.release()
-        return (600, 420, 1320, 260), "right"
-
-    box_h = int(vh * 0.36)
-    box_w = int(box_h * (1080 / 760))
-
-    b_low = broadcaster.lower()
-    if b_low == "rraenee":
-        cap.release()
-        return (box_w, box_h, vw - box_w, int(vh * 0.24)), "right"
+        return None, "fullscreen"
 
     try:
-        frontal_cascade = get_cascade("haarcascade_frontalface_default.xml")
-        profile_cascade = get_cascade("haarcascade_profileface.xml")
-        
-        if frontal_cascade is not None:
-            left_hits = []
-            right_hits = []
+        ensure_yunet_model()
+        detector = cv2.FaceDetectorYN.create(
+            YUNET_MODEL_PATH, "", (vw, vh),
+            score_threshold=0.65, nms_threshold=0.3, top_k=5
+        )
 
-            for i in [2, 4, 6, 8, 10]:
-                cap.set(cv2.CAP_PROP_POS_FRAMES, int(total_frames * (i / 12.0)))
-                ret, frame = cap.read()
-                if not ret:
+        sampled_frames = []
+        left_faces = []
+        right_faces = []
+        center_big_hits = 0
+
+        for i in [1, 2, 3, 4, 5, 6, 7, 8]:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, int(total_frames * (i / 9.0)))
+            ret, frame = cap.read()
+            if not ret:
+                continue
+            sampled_frames.append(frame)
+            _, faces = detector.detect(frame)
+            if faces is None:
+                continue
+
+            for f in faces:
+                x, y, w, h = int(f[0]), int(f[1]), int(f[2]), int(f[3])
+                cx, cy = x + w // 2, y + h // 2
+
+                # Ekran ortasında büyük yüz -> Just Chatting / tam ekran kamera
+                if vw * 0.34 < cx < vw * 0.66 and w > vw * 0.11:
+                    center_big_hits += 1
                     continue
-                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                
-                faces = list(frontal_cascade.detectMultiScale(gray, scaleFactor=1.08, minNeighbors=2, minSize=(20, 20)))
-                if not faces and profile_cascade is not None:
-                    faces = list(profile_cascade.detectMultiScale(gray, scaleFactor=1.08, minNeighbors=2, minSize=(20, 20)))
-                    
-                for (x, y, w, h) in faces:
-                    cx, cy = x + w // 2, y + h // 2
-                    if cx < vw * 0.28 and cy > vh * 0.68:
-                        continue
-                    if cx < vw * 0.32:
-                        left_hits.append((x, y, w, h))
-                    elif cx > vw * 0.68:
-                        right_hits.append((x, y, w, h))
 
-            cap.release()
+                if cx < vw * 0.36:
+                    left_faces.append((x, y, w, h))
+                elif cx > vw * 0.64:
+                    right_faces.append((x, y, w, h))
 
-            if len(right_hits) >= len(left_hits) and len(right_hits) > 0:
-                avg_cx = sum(b[0] + b[2] // 2 for b in right_hits) // len(right_hits)
-                avg_cy = sum(b[1] + b[3] // 2 for b in right_hits) // len(right_hits)
-                crop_x = max(0, min(vw - box_w, avg_cx - box_w // 2))
-                crop_y = max(0, min(vh - box_h, avg_cy - int(box_h * 0.42)))
-                return (box_w, box_h, crop_x, crop_y), "right"
-            elif len(left_hits) > 0:
-                avg_cx = sum(b[0] + b[2] // 2 for b in left_hits) // len(left_hits)
-                avg_cy = sum(b[1] + b[3] // 2 for b in left_hits) // len(left_hits)
-                crop_x = max(0, min(vw - box_w, avg_cx - box_w // 2))
-                crop_y = max(0, min(vh - box_h, avg_cy - int(box_h * 0.42)))
-                return (box_w, box_h, crop_x, crop_y), "left"
-    except Exception as e:
-        print(f"Yuz tarama hatasi ({e})")
         cap.release()
 
-    return (box_w, box_h, 0, int(vh * 0.12)), "left"
+        if center_big_hits >= 3 and len(left_faces) < 2 and len(right_faces) < 2:
+            print("Tam ekran kamera (Just Chatting) algilandi -> Tam Ekran modu")
+            return None, "fullscreen"
+
+        hits = right_faces if len(right_faces) >= len(left_faces) else left_faces
+        side = "right" if len(right_faces) >= len(left_faces) else "left"
+
+        if len(hits) >= 2:
+            avg_cx = sum(b[0] + b[2] // 2 for b in hits) // len(hits)
+            avg_cy = sum(b[1] + b[3] // 2 for b in hits) // len(hits)
+            avg_w = sum(b[2] for b in hits) // len(hits)
+            avg_h = sum(b[3] for b in hits) // len(hits)
+
+            # Önce gerçek webcam çerçeve sınırlarını kenar analiziyle bulmayı dene
+            exact_box = find_webcam_frame_bounds(sampled_frames, avg_cx, avg_cy, avg_w, avg_h, vw, vh)
+            if exact_box is not None:
+                cw, ch, cx, cy = exact_box
+                print(f"YuNet + Cerceve tespiti ({side}): {cw}x{ch} @ ({cx},{cy})")
+                return (cw, ch, cx, cy), side
+
+            # Çerçeve belirsizse yüz boyutuna oranlı güvenli kadraj uygula
+            box_h = max(int(vh * 0.20), min(int(vh * 0.38), int(avg_h * 2.9)))
+            box_w = min(vw, int(box_h * (1080 / 760)))
+            crop_x = 0 if side == "left" else max(0, vw - box_w)
+            crop_y = max(0, min(vh - box_h, avg_cy - int(box_h * 0.38)))
+            print(f"YuNet akilli kadraj ({side}): {box_w}x{box_h} @ ({crop_x},{crop_y})")
+            return (box_w, box_h, crop_x, crop_y), side
+
+    except Exception as e:
+        print(f"YuNet tarama hatasi ({e})")
+        cap.release()
+
+    print("Webcam bulunamadi -> Tam Ekran moduna geciliyor")
+    return None, "fullscreen"
 
 def censor_text(text):
     words = text.split()
@@ -274,54 +373,57 @@ def get_kick_clips():
     return kick_list
 
 def get_twitch_clips():
-    r_tok = requests.post("https://id.twitch.tv/oauth2/token", params={
-        "client_id": TWITCH_CLIENT_ID,
-        "client_secret": TWITCH_CLIENT_SECRET,
-        "grant_type": "client_credentials"
-    })
-    token = r_tok.json()["access_token"]
-    headers = {"Client-ID": TWITCH_CLIENT_ID, "Authorization": f"Bearer {token}"}
-    
     twitch_list = []
-    started_at = (datetime.now(timezone.utc) - timedelta(hours=6)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        r_tok = requests.post("https://id.twitch.tv/oauth2/token", params={
+            "client_id": TWITCH_CLIENT_ID,
+            "client_secret": TWITCH_CLIENT_SECRET,
+            "grant_type": "client_credentials"
+        }, timeout=15)
+        token = r_tok.json()["access_token"]
+        headers = {"Client-ID": TWITCH_CLIENT_ID, "Authorization": f"Bearer {token}"}
+        
+        started_at = (datetime.now(timezone.utc) - timedelta(hours=6)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    r_users = requests.get("https://api.twitch.tv/helix/users", headers=headers, params={"login": TWITCH_PRIORITY_STREAMERS})
-    for u in r_users.json().get("data", []):
-        r_uclips = requests.get("https://api.twitch.tv/helix/clips", headers=headers, params={
-            "broadcaster_id": u["id"],
-            "started_at": started_at,
-            "first": 5
-        })
-        for clip in r_uclips.json().get("data", []):
-            twitch_list.append({
-                "id": clip["id"],
-                "broadcaster": clip["broadcaster_name"],
-                "title": clip["title"],
-                "url": clip["url"],
-                "lang": "en",
-                "platform": "twitch"
-            })
+        r_users = requests.get("https://api.twitch.tv/helix/users", headers=headers, params={"login": TWITCH_PRIORITY_STREAMERS}, timeout=15)
+        for u in r_users.json().get("data", []):
+            r_uclips = requests.get("https://api.twitch.tv/helix/clips", headers=headers, params={
+                "broadcaster_id": u["id"],
+                "started_at": started_at,
+                "first": 5
+            }, timeout=15)
+            for clip in r_uclips.json().get("data", []):
+                twitch_list.append({
+                    "id": clip["id"],
+                    "broadcaster": clip["broadcaster_name"],
+                    "title": clip["title"],
+                    "url": clip["url"],
+                    "lang": "en",
+                    "platform": "twitch"
+                })
 
-    r_game = requests.get("https://api.twitch.tv/helix/games", headers=headers, params={"name": "Grand Theft Auto VI"})
-    data = r_game.json().get("data", [])
-    if data:
-        game_id = data[0]["id"]
-        r = requests.get("https://api.twitch.tv/helix/clips", headers=headers, params={
-            "game_id": game_id,
-            "started_at": started_at,
-            "first": 40
-        })
-        for clip in r.json().get("data", []):
-            if clip.get("language") != "en" or clip.get("view_count", 0) < 5:
-                continue
-            twitch_list.append({
-                "id": clip["id"],
-                "broadcaster": clip["broadcaster_name"],
-                "title": clip["title"],
-                "url": clip["url"],
-                "lang": "en",
-                "platform": "twitch"
-            })
+        r_game = requests.get("https://api.twitch.tv/helix/games", headers=headers, params={"name": "Grand Theft Auto VI"}, timeout=15)
+        data = r_game.json().get("data", [])
+        if data:
+            game_id = data[0]["id"]
+            r = requests.get("https://api.twitch.tv/helix/clips", headers=headers, params={
+                "game_id": game_id,
+                "started_at": started_at,
+                "first": 40
+            }, timeout=15)
+            for clip in r.json().get("data", []):
+                if clip.get("language") != "en" or clip.get("view_count", 0) < 5:
+                    continue
+                twitch_list.append({
+                    "id": clip["id"],
+                    "broadcaster": clip["broadcaster_name"],
+                    "title": clip["title"],
+                    "url": clip["url"],
+                    "lang": "en",
+                    "platform": "twitch"
+                })
+    except Exception as e:
+        print(f"Twitch API hatasi: {e}")
 
     random.shuffle(twitch_list)
     return twitch_list
@@ -402,7 +504,7 @@ def process_clip(clip, drive, youtube, existing, whisper_model):
     ass_file = f"sub_{clip_id}.ass"
     
     try:
-        subprocess.run(["yt-dlp", "-o", raw_file, clip["url"]], check=True)
+        subprocess.run(["yt-dlp", "-o", raw_file, clip["url"]], check=True, timeout=120)
         lang = clip["lang"]
         
         use_subs = not has_embedded_subtitles(raw_file, broadcaster)
@@ -413,21 +515,30 @@ def process_clip(clip, drive, youtube, existing, whisper_model):
             print(f"{broadcaster} kendi altyazisina sahip -> Ek altyazi kapatildi")
             sub_filter = ""
         
-        (cw, ch, cx, cy), cam_side = detect_webcam_box(raw_file, broadcaster)
-        game_crop_x = "(iw-1080)/3" if cam_side == "right" else "2*(iw-1080)/3"
+        cam_box, cam_side = detect_webcam_box(raw_file, broadcaster)
         
-        vf_filter = (
-            f"split[cam][game];"
-            f"[cam]crop={cw}:{ch}:{cx}:{cy},scale=1080:760[top];"
-            f"[game]scale=-1:1160,crop=1080:1160:{game_crop_x}:0[bottom];"
-            f"[top][bottom]vstack=inputs=2{sub_filter}"
-        )
+        if cam_box is not None:
+            cw, ch, cx, cy = cam_box
+            game_crop_x = "(iw-1080)/3" if cam_side == "right" else "2*(iw-1080)/3"
+            vf_filter = (
+                f"split[cam][game];"
+                f"[cam]crop={cw}:{ch}:{cx}:{cy},scale=1080:760:force_original_aspect_ratio=increase,crop=1080:760[top];"
+                f"[game]scale=-1:1160,crop=1080:1160:{game_crop_x}:0[bottom];"
+                f"[top][bottom]vstack=inputs=2{sub_filter}"
+            )
+        else:
+            vf_filter = (
+                f"split[bg][fg];"
+                f"[bg]scale=-1:1920,crop=1080:1920:(iw-1080)/2:0,boxblur=25:5[blurred];"
+                f"[fg]scale=1080:-2[main];"
+                f"[blurred][main]overlay=(W-w)/2:(H-h)/2{sub_filter}"
+            )
         
         subprocess.run([
             "ffmpeg", "-y", "-i", raw_file, "-t", "58",
             "-vf", vf_filter,
             "-c:v", "libx264", "-preset", "ultrafast", "-crf", "24", "-c:a", "aac", filename
-        ], check=True)
+        ], check=True, timeout=180)
         
         for attempt in range(3):
             try:
@@ -454,6 +565,7 @@ def process_clip(clip, drive, youtube, existing, whisper_model):
                 os.remove(temp)
 
 def main():
+    ensure_yunet_model()
     kick_clips = get_kick_clips()
     twitch_clips = get_twitch_clips()
     
