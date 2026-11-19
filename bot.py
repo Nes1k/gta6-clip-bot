@@ -24,13 +24,12 @@ GDRIVE_REFRESH_TOKEN = os.environ["GDRIVE_REFRESH_TOKEN"]
 YT_REFRESH_TOKEN = os.environ["YT_REFRESH_TOKEN"]
 
 KICK_STREAMERS = [
-    "rraenee",
-    "elraenn",
-    "kendinemuzisyen",
-    "wtcn",
-    "mithrain",
     "adinross",
-    "xqc"
+    "xqc",
+    "n3on",
+    "trainwreckstv",
+    "destiny",
+    "brucedropemoff"
 ]
 
 TWITCH_PRIORITY_STREAMERS = [
@@ -39,6 +38,10 @@ TWITCH_PRIORITY_STREAMERS = [
     "xqc",
     "caseoh_",
     "jynxzi",
+    "plaqueboymax",
+    "agent00",
+    "stableronaldo",
+    "lacy",
     "hasanabi",
     "lirik",
     "summit1g"
@@ -54,26 +57,19 @@ BLACKLIST_CHANNELS = {
     "trailer_kanal_adi_2"
 }
 
-SKIP_KEYWORDS = ["trailer", "fivem", "gta 5", "gtav", "mod", "roleplay", "rp"]
+SKIP_KEYWORDS = ["trailer", "fivem", "gta 5", "gtav", "mod", "roleplay", "rp", "reroll"]
 
 YT_TITLES_EN = [
     "GTA 6 Physics Are Actually INSANE! 🤯 #gta6 #shorts",
     "Rockstar Really Thought of Everything in GTA 6... 🔥 #gta6 #shorts",
     "This GTA 6 Detail Blew Everyone's Mind! 😱 #gtavi #shorts",
-    "GTA 6 Gameplay Looks Next-Gen! 🚨 #gta6 #rockstargames #shorts"
-]
-
-YT_TITLES_TR = [
-    "GTA 6 Fizikleri Gerçekten İnanılmaz! 🤯 #gta6 #shorts",
-    "Rockstar GTA 6'da Her Şeyi Düşünmüş... 🔥 #gta6 #gtavi #shorts",
-    "GTA 6'daki Bu Detay Herkesi Şaşırttı! 😱 #gta6 #shorts",
-    "GTA 6 Oynanış Anları Efsane Görünüyor! 🚨 #gta6 #shorts"
+    "GTA 6 Gameplay Looks Next-Gen! 🚨 #gta6 #rockstargames #shorts",
+    "No Way This Just Happened in GTA 6... 😭 #gta6 #gtavi #shorts"
 ]
 
 BAD_ROOTS = [
     "fuck", "shit", "bitch", "asshole", "bastard", "dick", "pussy",
-    "cunt", "nigg", "faggot", "retard", "whore", "slut", "motherf",
-    "amk", "aq", "sik", "orospu", "piç", "yarrak", "göt", "kahpe", "ibne"
+    "cunt", "nigg", "faggot", "retard", "whore", "slut", "motherf"
 ]
 
 YUNET_MODEL_PATH = "face_detection_yunet_2023mar.onnx"
@@ -110,43 +106,26 @@ def has_embedded_subtitles(video_path, broadcaster=""):
     return text_like_frames >= 2
 
 def find_webcam_frame_bounds(frames, face_cx, face_cy, face_w, face_h, vw, vh):
-    """
-    Yüz merkezinden dışa doğru piksellerin video boyunca sabit kaldığı
-    gerçek webcam kutusunun sınırlarını (left, top, right, bottom) tespit eder.
-    """
     if len(frames) < 2:
         return None
 
-    # Ardışık kareler arasındaki hareket farkını hesapla (webcam arka planı sabit, oyun hareketlidir)
-    diffs = []
-    for i in range(len(frames) - 1):
-        g1 = cv2.cvtColor(frames[i], cv2.COLOR_BGR2GRAY).astype(np.float32)
-        g2 = cv2.cvtColor(frames[i + 1], cv2.COLOR_BGR2GRAY).astype(np.float32)
-        diffs.append(np.abs(g1 - g2))
-    avg_diff = np.mean(diffs, axis=0)
-
-    # Yüz merkezinden başlayarak sağa, sola, yukarı, aşağı gerçek webcam sınırlarını bul
     min_w = int(face_w * 2.2)
     max_w = int(vw * 0.42)
     min_h = int(face_h * 2.0)
     max_h = int(vh * 0.45)
 
-    # Kenar çizgilerini (overlay çerçevesi veya keskin geçiş) bulmak için Sobel kullan
     ref_gray = cv2.cvtColor(frames[len(frames) // 2], cv2.COLOR_BGR2GRAY)
     grad_x = np.abs(cv2.Sobel(ref_gray, cv2.CV_32F, 1, 0, ksize=3))
     grad_y = np.abs(cv2.Sobel(ref_gray, cv2.CV_32F, 0, 1, ksize=3))
 
-    # Dikey çizgi profili (sol/sağ sınır adayları)
     y_band1 = max(0, face_cy - face_h)
     y_band2 = min(vh, face_cy + face_h)
     col_scores = np.mean(grad_x[y_band1:y_band2, :], axis=0)
 
-    # Yatay çizgi profili (üst/alt sınır adayları)
     x_band1 = max(0, face_cx - face_w)
     x_band2 = min(vw, face_cx + face_w)
     row_scores = np.mean(grad_y[:, x_band1:x_band2], axis=1)
 
-    # Sol sınır: eğer yüz ekranın sol kenarına yakınsa (x < %22) doğrudan 0 al
     if face_cx < vw * 0.22:
         left = 0
         right_search_start = max(face_cx + int(face_w * 0.8), min_w)
@@ -155,7 +134,6 @@ def find_webcam_frame_bounds(frames, face_cx, face_cy, face_w, face_h, vw, vh):
             right = right_search_start + int(np.argmax(col_scores[right_search_start:right_search_end]))
         else:
             right = min(vw, int(face_w * 3.5))
-    # Sağ sınır: eğer yüz ekranın sağ kenarına yakınsa (x > %78) doğrudan vw al
     elif face_cx > vw * 0.78:
         right = vw
         left_search_end = min(face_cx - int(face_w * 0.8), vw - min_w)
@@ -167,7 +145,6 @@ def find_webcam_frame_bounds(frames, face_cx, face_cy, face_w, face_h, vw, vh):
     else:
         return None
 
-    # Üst ve alt sınırları tespit et
     top_search_start = max(0, face_cy - int(max_h * 0.65))
     top_search_end = max(top_search_start + 1, face_cy - int(face_h * 0.65))
     if face_cy < vh * 0.20:
@@ -191,11 +168,7 @@ def find_webcam_frame_bounds(frames, face_cx, face_cy, face_w, face_h, vw, vh):
 
     return (cw, ch, left, top)
 
-def detect_webcam_box(video_path, broadcaster=""):
-    """
-    YuNet derin öğrenme modeli ile yüzü %99 doğrulukla bulur,
-    ardından webcam çerçevesinin gerçek sınırlarını ölçerek tam oturtur.
-    """
+def detect_webcam_box(video_path):
     cap = cv2.VideoCapture(video_path)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     vw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -231,7 +204,6 @@ def detect_webcam_box(video_path, broadcaster=""):
                 x, y, w, h = int(f[0]), int(f[1]), int(f[2]), int(f[3])
                 cx, cy = x + w // 2, y + h // 2
 
-                # Ekran ortasında büyük yüz -> Just Chatting / tam ekran kamera
                 if vw * 0.34 < cx < vw * 0.66 and w > vw * 0.11:
                     center_big_hits += 1
                     continue
@@ -244,7 +216,6 @@ def detect_webcam_box(video_path, broadcaster=""):
         cap.release()
 
         if center_big_hits >= 3 and len(left_faces) < 2 and len(right_faces) < 2:
-            print("Tam ekran kamera (Just Chatting) algilandi -> Tam Ekran modu")
             return None, "fullscreen"
 
         hits = right_faces if len(right_faces) >= len(left_faces) else left_faces
@@ -256,38 +227,28 @@ def detect_webcam_box(video_path, broadcaster=""):
             avg_w = sum(b[2] for b in hits) // len(hits)
             avg_h = sum(b[3] for b in hits) // len(hits)
 
-            # Önce gerçek webcam çerçeve sınırlarını kenar analiziyle bulmayı dene
             exact_box = find_webcam_frame_bounds(sampled_frames, avg_cx, avg_cy, avg_w, avg_h, vw, vh)
             if exact_box is not None:
                 cw, ch, cx, cy = exact_box
-                print(f"YuNet + Cerceve tespiti ({side}): {cw}x{ch} @ ({cx},{cy})")
                 return (cw, ch, cx, cy), side
 
-            # Çerçeve belirsizse yüz boyutuna oranlı güvenli kadraj uygula
             box_h = max(int(vh * 0.20), min(int(vh * 0.38), int(avg_h * 2.9)))
             box_w = min(vw, int(box_h * (1080 / 760)))
             crop_x = 0 if side == "left" else max(0, vw - box_w)
             crop_y = max(0, min(vh - box_h, avg_cy - int(box_h * 0.38)))
-            print(f"YuNet akilli kadraj ({side}): {box_w}x{box_h} @ ({crop_x},{crop_y})")
             return (box_w, box_h, crop_x, crop_y), side
 
     except Exception as e:
         print(f"YuNet tarama hatasi ({e})")
         cap.release()
 
-    print("Webcam bulunamadi -> Tam Ekran moduna geciliyor")
     return None, "fullscreen"
 
-def censor_text(text):
-    words = text.split()
-    cleaned = []
-    for w in words:
-        stripped = re.sub(r'[^\w]', '', w).lower()
-        if any(root in stripped for root in BAD_ROOTS):
-            cleaned.append(w[0] + "***")
-        else:
-            cleaned.append(w)
-    return " ".join(cleaned)
+def censor_word(word_str):
+    stripped = re.sub(r'[^\w]', '', word_str).lower()
+    if any(root in stripped for root in BAD_ROOTS):
+        return word_str[0] + "***"
+    return word_str
 
 def format_ass_time(seconds):
     h = int(seconds // 3600)
@@ -296,16 +257,36 @@ def format_ass_time(seconds):
     cs = int((seconds - int(seconds)) * 100)
     return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
 
-def generate_shorts_subtitles(video_path, ass_path, model, lang="en"):
+def extract_clean_voice_wav(video_path, wav_path):
+    subprocess.run([
+        "ffmpeg", "-y", "-i", video_path, "-t", "58",
+        "-vn", "-ac", "1", "-ar", "16000",
+        "-af", "highpass=f=110,lowpass=f=4800,dynaudnorm=f=150:g=15",
+        wav_path
+    ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
+
+def generate_shorts_subtitles(video_path, ass_path, model):
+    clean_wav = video_path + "_clean.wav"
+    try:
+        extract_clean_voice_wav(video_path, clean_wav)
+        audio_input = clean_wav
+    except Exception:
+        audio_input = video_path
+
     segments, _ = model.transcribe(
-        video_path,
-        language=lang,
+        audio_input,
+        language="en",
+        beam_size=5,
         word_timestamps=True,
         vad_filter=True,
-        no_speech_threshold=0.65,
-        vad_parameters=dict(min_silence_duration_ms=450)
+        no_speech_threshold=0.60,
+        condition_on_previous_text=False,
+        vad_parameters=dict(min_silence_duration_ms=350)
     )
     
+    if os.path.exists(clean_wav):
+        os.remove(clean_wav)
+
     ass_header = """[Script Info]
 ScriptType: v4.00+
 PlayResX: 1080
@@ -313,7 +294,7 @@ PlayResY: 1920
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: ShortsStyle,DejaVu Sans,72,&H0000FFFF,&H00FFFFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,6,2,2,60,60,340,1
+Style: ShortsStyle,Montserrat,82,&H00FFFFFF,&H0000FFFF,&H00000000,&H99000000,-1,0,0,0,100,100,1,0,1,8,3,2,50,50,360,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -322,20 +303,35 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     for segment in segments:
         if not segment.words:
             continue
-        chunk = []
-        for word in segment.words:
-            if word.probability < 0.45:
+        valid_words = [w for w in segment.words if w.probability >= 0.42]
+        
+        for idx in range(0, len(valid_words), 2):
+            pair = valid_words[idx:idx + 2]
+            if not pair:
                 continue
-            chunk.append(word)
-            if len(chunk) == 3 or word == segment.words[-1]:
-                if not chunk:
-                    continue
-                start_t = format_ass_time(chunk[0].start)
-                end_t = format_ass_time(chunk[-1].end)
-                raw_phrase = " ".join(w.word.strip() for w in chunk)
-                safe_phrase = censor_text(raw_phrase).upper()
-                events.append(f"Dialogue: 0,{start_t},{end_t},ShortsStyle,,0,0,0,,{safe_phrase}")
-                chunk = []
+
+            w1_text = censor_word(pair[0].word.strip()).upper()
+            w2_text = censor_word(pair[1].word.strip()).upper() if len(pair) > 1 else ""
+
+            if len(pair) == 1:
+                t_start = format_ass_time(pair[0].start)
+                t_end = format_ass_time(pair[0].end)
+                pop = r"{\fscx116\fscy116\t(0,75,\fscx100\fscy100)\c&H0000FFFF&}"
+                events.append(f"Dialogue: 0,{t_start},{t_end},ShortsStyle,,0,0,0,,{pop}{w1_text}")
+            else:
+                t1_start = format_ass_time(pair[0].start)
+                t1_end = format_ass_time(pair[1].start)
+                if pair[1].start <= pair[0].start:
+                    t1_end = format_ass_time((pair[0].start + pair[1].end) / 2.0)
+
+                pop_in = r"{\fscx115\fscy115\t(0,75,\fscx100\fscy100)}"
+                line1 = f"{pop_in}{{\\c&H0000FFFF&}}{w1_text} {{\\c&H00FFFFFF&}}{w2_text}"
+                events.append(f"Dialogue: 0,{t1_start},{t1_end},ShortsStyle,,0,0,0,,{line1}")
+
+                t2_start = t1_end
+                t2_end = format_ass_time(pair[1].end)
+                line2 = f"{{\\c&H00FFFFFF&}}{w1_text} {{\\c&H0000FFFF&}}{w2_text}"
+                events.append(f"Dialogue: 0,{t2_start},{t2_end},ShortsStyle,,0,0,0,,{line2}")
 
     with open(ass_path, "w", encoding="utf-8") as f:
         f.write(ass_header + "\n".join(events))
@@ -346,16 +342,16 @@ def get_kick_clips():
     streamers = KICK_STREAMERS.copy()
     random.shuffle(streamers)
     
-    tr_streamers = {"rraenee", "elraenn", "kendinemuzisyen", "wtcn", "mithrain"}
-    
     for streamer in streamers:
         try:
-            url = f"https://kick.com/api/v2/channels/{streamer}/clips?cursor=0&sort=date&time=day"
+            url = f"https://kick.com/api/v2/channels/{streamer}/clips?cursor=0&sort=views&time=day"
             r = scraper.get(url, timeout=15)
             if r.status_code != 200:
                 continue
             data = r.json().get("clips", [])
-            for c in data[:2]:
+            for c in data[:3]:
+                if c.get("view_count", 0) < 30:
+                    continue
                 video_url = c.get("clip_url") or c.get("video_url")
                 if not video_url:
                     continue
@@ -364,8 +360,8 @@ def get_kick_clips():
                     "broadcaster": streamer.capitalize(),
                     "title": c.get("title", "GTA 6 Clip"),
                     "url": video_url,
-                    "lang": "tr" if streamer in tr_streamers else "en",
-                    "platform": "kick"
+                    "platform": "kick",
+                    "views": c.get("view_count", 0)
                 })
         except Exception as e:
             print(f"Kick ({streamer}) cekilemedi: {e}")
@@ -383,7 +379,7 @@ def get_twitch_clips():
         token = r_tok.json()["access_token"]
         headers = {"Client-ID": TWITCH_CLIENT_ID, "Authorization": f"Bearer {token}"}
         
-        started_at = (datetime.now(timezone.utc) - timedelta(hours=6)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        started_at = (datetime.now(timezone.utc) - timedelta(hours=12)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
         r_users = requests.get("https://api.twitch.tv/helix/users", headers=headers, params={"login": TWITCH_PRIORITY_STREAMERS}, timeout=15)
         for u in r_users.json().get("data", []):
@@ -393,13 +389,15 @@ def get_twitch_clips():
                 "first": 5
             }, timeout=15)
             for clip in r_uclips.json().get("data", []):
+                if clip.get("view_count", 0) < 25:
+                    continue
                 twitch_list.append({
                     "id": clip["id"],
                     "broadcaster": clip["broadcaster_name"],
                     "title": clip["title"],
                     "url": clip["url"],
-                    "lang": "en",
-                    "platform": "twitch"
+                    "platform": "twitch",
+                    "views": clip.get("view_count", 0)
                 })
 
         r_game = requests.get("https://api.twitch.tv/helix/games", headers=headers, params={"name": "Grand Theft Auto VI"}, timeout=15)
@@ -409,24 +407,26 @@ def get_twitch_clips():
             r = requests.get("https://api.twitch.tv/helix/clips", headers=headers, params={
                 "game_id": game_id,
                 "started_at": started_at,
-                "first": 40
+                "first": 50
             }, timeout=15)
             for clip in r.json().get("data", []):
-                if clip.get("language") != "en" or clip.get("view_count", 0) < 5:
+                if clip.get("language") != "en" or clip.get("view_count", 0) < 40:
                     continue
                 twitch_list.append({
                     "id": clip["id"],
                     "broadcaster": clip["broadcaster_name"],
                     "title": clip["title"],
                     "url": clip["url"],
-                    "lang": "en",
-                    "platform": "twitch"
+                    "platform": "twitch",
+                    "views": clip.get("view_count", 0)
                 })
     except Exception as e:
         print(f"Twitch API hatasi: {e}")
 
-    random.shuffle(twitch_list)
-    return twitch_list
+    twitch_list.sort(key=lambda x: x["views"], reverse=True)
+    top_pool = twitch_list[:15]
+    random.shuffle(top_pool)
+    return top_pool
 
 def get_creds(refresh_token):
     return Credentials(
@@ -455,15 +455,10 @@ def upload_to_drive(drive_service, filename, folder_id):
     while response is None:
         _, response = request.next_chunk()
 
-def upload_to_youtube(youtube_service, filename, lang="en", broadcaster=""):
-    if lang == "tr":
-        base_title = random.choice(YT_TITLES_TR)
-        title = f"{broadcaster} - {base_title}"[:95]
-        desc = f"{broadcaster} GTA 6 (Grand Theft Auto VI) en iyi anlar ve tepkiler.\n\n#gta6 #gtavi #{broadcaster.lower()} #shorts"
-    else:
-        base_title = random.choice(YT_TITLES_EN)
-        title = f"{broadcaster} - {base_title}"[:95]
-        desc = f"{broadcaster} Grand Theft Auto VI (GTA 6) best moments and reactions.\n\n#gta6 #gtavi #{broadcaster.lower()} #shorts"
+def upload_to_youtube(youtube_service, filename, broadcaster=""):
+    base_title = random.choice(YT_TITLES_EN)
+    title = f"{broadcaster} - {base_title}"[:95]
+    desc = f"{broadcaster} Grand Theft Auto VI (GTA 6) best moments and reactions.\n\n#gta6 #gtavi #{broadcaster.lower()} #shorts"
 
     body = {
         "snippet": {
@@ -505,17 +500,16 @@ def process_clip(clip, drive, youtube, existing, whisper_model):
     
     try:
         subprocess.run(["yt-dlp", "-o", raw_file, clip["url"]], check=True, timeout=120)
-        lang = clip["lang"]
         
         use_subs = not has_embedded_subtitles(raw_file, broadcaster)
         if use_subs:
-            generate_shorts_subtitles(raw_file, ass_file, whisper_model, lang=lang)
+            generate_shorts_subtitles(raw_file, ass_file, whisper_model)
             sub_filter = f",ass={ass_file}"
         else:
             print(f"{broadcaster} kendi altyazisina sahip -> Ek altyazi kapatildi")
             sub_filter = ""
         
-        cam_box, cam_side = detect_webcam_box(raw_file, broadcaster)
+        cam_box, cam_side = detect_webcam_box(raw_file)
         
         if cam_box is not None:
             cw, ch, cx, cy = cam_box
@@ -551,7 +545,7 @@ def process_clip(clip, drive, youtube, existing, whisper_model):
                 drive = build("drive", "v3", credentials=get_creds(GDRIVE_REFRESH_TOKEN))
         
         try:
-            upload_to_youtube(youtube, filename, lang=lang, broadcaster=broadcaster)
+            upload_to_youtube(youtube, filename, broadcaster=broadcaster)
         except Exception as e:
             print(f"YouTube kotasi dolu veya atlandi: {e}")
 
@@ -566,35 +560,20 @@ def process_clip(clip, drive, youtube, existing, whisper_model):
 
 def main():
     ensure_yunet_model()
-    kick_clips = get_kick_clips()
-    twitch_clips = get_twitch_clips()
+    all_clips = get_twitch_clips() + get_kick_clips()
     
     drive = build("drive", "v3", credentials=get_creds(GDRIVE_REFRESH_TOKEN))
     youtube = build("youtube", "v3", credentials=get_creds(YT_REFRESH_TOKEN))
     
     existing = get_existing_files(drive)
-    whisper_model = WhisperModel("base", device="cpu", compute_type="int8")
+    whisper_model = WhisperModel("small.en", device="cpu", compute_type="int8")
 
-    twitch_done = False
-    for clip in twitch_clips:
-        if process_clip(clip, drive, youtube, existing, whisper_model):
-            twitch_done = True
+    uploaded = 0
+    for clip in all_clips:
+        if uploaded >= 2:
             break
-
-    kick_done = False
-    for clip in kick_clips:
         if process_clip(clip, drive, youtube, existing, whisper_model):
-            kick_done = True
-            break
-
-    if not twitch_done:
-        for clip in kick_clips:
-            if process_clip(clip, drive, youtube, existing, whisper_model):
-                break
-    elif not kick_done:
-        for clip in twitch_clips:
-            if process_clip(clip, drive, youtube, existing, whisper_model):
-                break
+            uploaded += 1
 
 if __name__ == "__main__":
     main()
