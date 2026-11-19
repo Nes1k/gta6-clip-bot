@@ -248,47 +248,30 @@ def censor_word(word_str):
     return word_str
 
 def format_ass_time(seconds):
+    seconds = max(0.0, seconds)
     h = int(seconds // 3600)
     m = int((seconds % 3600) // 60)
     s = int(seconds % 60)
     cs = int((seconds - int(seconds)) * 100)
     return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
 
-def extract_clean_voice_wav(video_path, wav_path):
-    subprocess.run([
-        "ffmpeg", "-y", "-i", video_path, "-t", "58",
-        "-vn", "-ac", "1", "-ar", "16000",
-        "-af", "highpass=f=120,lowpass=f=4500,dynaudnorm=f=150:g=15",
-        wav_path
-    ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
-
 def generate_shorts_subtitles(video_path, ass_path, model, is_split_screen=True):
     """
-    Cümle bazlı yüksek doğruluklu transkripsiyonu (distil-medium.en) alıp
-    matematiksel olarak pürüzsüz 2 kelimelik Karaoke Pop-Up bloklarına böler.
+    Orijinal ham ses üzerinde tam medium.en modeli ve gerçek kelime zaman damgaları
+    (word_timestamps=True) kullanarak milimetrik senkronlu 2 kelimelik altyazı üretir.
     """
-    clean_wav = video_path + "_clean.wav"
-    try:
-        extract_clean_voice_wav(video_path, clean_wav)
-        audio_input = clean_wav
-    except Exception:
-        audio_input = video_path
-
     segments, _ = model.transcribe(
-        audio_input,
+        video_path,
         language="en",
         beam_size=5,
-        word_timestamps=False,
+        word_timestamps=True,
         vad_filter=True,
-        no_speech_threshold=0.62,
+        no_speech_threshold=0.65,
+        log_prob_threshold=-0.8,
         condition_on_previous_text=False,
-        vad_parameters=dict(min_silence_duration_ms=400)
+        vad_parameters=dict(min_silence_duration_ms=450)
     )
 
-    if os.path.exists(clean_wav):
-        os.remove(clean_wav)
-
-    # Split-screen'de tam kamera-oyun birleşim çizgisine (Y=780), tam ekranda ortaya (Alignment 5)
     if is_split_screen:
         alignment = 8
         margin_v = 710
@@ -310,47 +293,50 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
     events = []
     for segment in segments:
-        raw_text = segment.text.strip()
-        if not raw_text:
-            continue
-        words = [censor_word(w).upper() for w in raw_text.split() if re.sub(r'[^\w]', '', w)]
-        if not words:
+        if not segment.words:
             continue
 
-        seg_start = segment.start
-        seg_end = segment.end
-        total_dur = max(0.4, seg_end - seg_start)
-        total_chars = sum(len(w) for w in words)
-        if total_chars == 0:
+        # Düşük güvenli (halüsinasyon) kelimeleri ele
+        valid_words = [
+            w for w in segment.words
+            if w.probability >= 0.50 and re.sub(r'[^\w]', '', w.word)
+        ]
+        if not valid_words:
             continue
 
-        # Her kelimeye karakter uzunluğuna orantılı pürüzsüz zaman aralığı hesapla
-        timed_words = []
-        cursor = seg_start
-        for w in words:
-            w_dur = max(0.18, total_dur * (len(w) / total_chars))
-            timed_words.append((w, cursor, min(seg_end, cursor + w_dur)))
-            cursor += w_dur
+        for idx in range(0, len(valid_words), 2):
+            pair = valid_words[idx:idx + 2]
+            w1_text = censor_word(pair[0].word.strip()).upper()
 
-        for idx in range(0, len(timed_words), 2):
-            pair = timed_words[idx:idx + 2]
             if len(pair) == 1:
-                w1, t1, t2 = pair[0]
-                if t2 - t1 < 0.15:
-                    continue
+                t_start = pair[0].start
+                t_end = max(t_start + 0.25, pair[0].end)
                 pop = r"{\fscx114\fscy114\t(0,70,\fscx100\fscy100)\c&H0000FFFF&}"
-                events.append(f"Dialogue: 0,{format_ass_time(t1)},{format_ass_time(t2)},ShortsStyle,,0,0,0,,{pop}{w1}")
+                events.append(
+                    f"Dialogue: 0,{format_ass_time(t_start)},{format_ass_time(t_end)},ShortsStyle,,0,0,0,,{pop}{w1_text}"
+                )
             else:
-                w1, t1_start, t1_end = pair[0]
-                w2, t2_start, t2_end = pair[1]
-                if t2_end - t1_start < 0.25:
-                    continue
-                pop_in = r"{\fscx114\fscy114\t(0,70,\fscx100\fscy100)}"
-                line1 = f"{pop_in}{{\\c&H0000FFFF&}}{w1} {{\\c&H00FFFFFF&}}{w2}"
-                events.append(f"Dialogue: 0,{format_ass_time(t1_start)},{format_ass_time(t1_end)},ShortsStyle,,0,0,0,,{line1}")
+                w2_text = censor_word(pair[1].word.strip()).upper()
+                t1_start = pair[0].start
+                t2_end = max(t1_start + 0.35, pair[1].end)
 
-                line2 = f"{{\\c&H00FFFFFF&}}{w1} {{\\c&H0000FFFF&}}{w2}"
-                events.append(f"Dialogue: 0,{format_ass_time(t1_end)},{format_ass_time(t2_end)},ShortsStyle,,0,0,0,,{line2}")
+                # İki kelime arasındaki geçiş noktasını gerçek konuşma zamanından al
+                mid_t = pair[1].start
+                if mid_t <= t1_start + 0.10:
+                    mid_t = t1_start + (t2_end - t1_start) * 0.5
+                elif mid_t >= t2_end - 0.10:
+                    mid_t = t2_end - 0.10
+
+                pop_in = r"{\fscx114\fscy114\t(0,70,\fscx100\fscy100)}"
+                line1 = f"{pop_in}{{\\c&H0000FFFF&}}{w1_text} {{\\c&H00FFFFFF&}}{w2_text}"
+                events.append(
+                    f"Dialogue: 0,{format_ass_time(t1_start)},{format_ass_time(mid_t)},ShortsStyle,,0,0,0,,{line1}"
+                )
+
+                line2 = f"{{\\c&H00FFFFFF&}}{w1_text} {{\\c&H0000FFFF&}}{w2_text}"
+                events.append(
+                    f"Dialogue: 0,{format_ass_time(mid_t)},{format_ass_time(t2_end)},ShortsStyle,,0,0,0,,{line2}"
+                )
 
     with open(ass_path, "w", encoding="utf-8") as f:
         f.write(ass_header + "\n".join(events))
@@ -529,7 +515,7 @@ def process_clip(clip, drive, existing, whisper_model):
             "ffmpeg", "-y", "-i", raw_file, "-t", "58",
             "-vf", vf_filter,
             "-c:v", "libx264", "-preset", "ultrafast", "-crf", "24", "-c:a", "aac", filename
-        ], check=True, timeout=180)
+        ], check=True, timeout=240)
         
         for attempt in range(3):
             try:
@@ -556,7 +542,7 @@ def main():
     
     drive = build("drive", "v3", credentials=get_creds(GDRIVE_REFRESH_TOKEN))
     existing = get_existing_files(drive)
-    whisper_model = WhisperModel("distil-medium.en", device="cpu", compute_type="int8")
+    whisper_model = WhisperModel("medium.en", device="cpu", compute_type="int8")
 
     uploaded = 0
     for clip in all_clips:
