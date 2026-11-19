@@ -1,5 +1,4 @@
 import os
-import re
 import cv2
 import time
 import random
@@ -12,7 +11,6 @@ from datetime import datetime, timedelta, timezone
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
-from faster_whisper import WhisperModel
 
 TWITCH_CLIENT_ID = os.environ["TWITCH_CLIENT_ID"]
 TWITCH_CLIENT_SECRET = os.environ["TWITCH_CLIENT_SECRET"]
@@ -47,11 +45,6 @@ TWITCH_PRIORITY_STREAMERS = [
     "summit1g"
 ]
 
-BUILTIN_SUB_STREAMERS = {
-    "caseoh_",
-    "caseoh"
-}
-
 BLACKLIST_CHANNELS = {
     "trailer_kanal_adi_1",
     "trailer_kanal_adi_2"
@@ -67,43 +60,12 @@ YT_TITLES_EN = [
     "No Way This Just Happened in GTA 6... 😭 #gta6 #gtavi #shorts"
 ]
 
-BAD_ROOTS = [
-    "fuck", "shit", "bitch", "asshole", "bastard", "dick", "pussy",
-    "cunt", "nigg", "faggot", "retard", "whore", "slut", "motherf"
-]
-
 YUNET_MODEL_PATH = "face_detection_yunet_2023mar.onnx"
 YUNET_URL = "https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx"
 
 def ensure_yunet_model():
     if not os.path.exists(YUNET_MODEL_PATH):
         urllib.request.urlretrieve(YUNET_URL, YUNET_MODEL_PATH)
-
-def has_embedded_subtitles(video_path, broadcaster=""):
-    if broadcaster.lower() in BUILTIN_SUB_STREAMERS:
-        return True
-    cap = cv2.VideoCapture(video_path)
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    vw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    vh = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    if total_frames <= 0 or vw <= 0 or vh <= 0:
-        cap.release()
-        return False
-
-    text_like_frames = 0
-    for i in [2, 5, 8]:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, int(total_frames * (i / 10.0)))
-        ret, frame = cap.read()
-        if not ret:
-            continue
-        roi = frame[int(vh * 0.80):int(vh * 0.95), int(vw * 0.30):int(vw * 0.70)]
-        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-        edges = cv2.Canny(gray, 150, 300)
-        edge_density = edges.mean() / 255.0
-        if 0.04 < edge_density < 0.25:
-            text_like_frames += 1
-    cap.release()
-    return text_like_frames >= 2
 
 def find_webcam_frame_bounds(frames, face_cx, face_cy, face_w, face_h, vw, vh):
     if len(frames) < 2:
@@ -243,98 +205,6 @@ def detect_webcam_box(video_path):
         cap.release()
 
     return None, "fullscreen"
-
-def censor_word(word_str):
-    stripped = re.sub(r'[^\w]', '', word_str).lower()
-    if any(root in stripped for root in BAD_ROOTS):
-        return word_str[0] + "***"
-    return word_str
-
-def format_ass_time(seconds):
-    h = int(seconds // 3600)
-    m = int((seconds % 3600) // 60)
-    s = int(seconds % 60)
-    cs = int((seconds - int(seconds)) * 100)
-    return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
-
-def extract_clean_voice_wav(video_path, wav_path):
-    subprocess.run([
-        "ffmpeg", "-y", "-i", video_path, "-t", "58",
-        "-vn", "-ac", "1", "-ar", "16000",
-        "-af", "highpass=f=110,lowpass=f=4800,dynaudnorm=f=150:g=15",
-        wav_path
-    ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
-
-def generate_shorts_subtitles(video_path, ass_path, model):
-    clean_wav = video_path + "_clean.wav"
-    try:
-        extract_clean_voice_wav(video_path, clean_wav)
-        audio_input = clean_wav
-    except Exception:
-        audio_input = video_path
-
-    segments, _ = model.transcribe(
-        audio_input,
-        language="en",
-        beam_size=5,
-        word_timestamps=True,
-        vad_filter=True,
-        no_speech_threshold=0.60,
-        condition_on_previous_text=False,
-        vad_parameters=dict(min_silence_duration_ms=350)
-    )
-    
-    if os.path.exists(clean_wav):
-        os.remove(clean_wav)
-
-    ass_header = """[Script Info]
-ScriptType: v4.00+
-PlayResX: 1080
-PlayResY: 1920
-
-[V4+ Styles]
-Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: ShortsStyle,Montserrat,82,&H00FFFFFF,&H0000FFFF,&H00000000,&H99000000,-1,0,0,0,100,100,1,0,1,8,3,2,50,50,240,1
-
-[Events]
-Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
-"""
-    events = []
-    for segment in segments:
-        if not segment.words:
-            continue
-        valid_words = [w for w in segment.words if w.probability >= 0.42]
-        
-        for idx in range(0, len(valid_words), 2):
-            pair = valid_words[idx:idx + 2]
-            if not pair:
-                continue
-
-            w1_text = censor_word(pair[0].word.strip()).upper()
-            w2_text = censor_word(pair[1].word.strip()).upper() if len(pair) > 1 else ""
-
-            if len(pair) == 1:
-                t_start = format_ass_time(pair[0].start)
-                t_end = format_ass_time(pair[0].end)
-                pop = r"{\fscx116\fscy116\t(0,75,\fscx100\fscy100)\c&H0000FFFF&}"
-                events.append(f"Dialogue: 0,{t_start},{t_end},ShortsStyle,,0,0,0,,{pop}{w1_text}")
-            else:
-                t1_start = format_ass_time(pair[0].start)
-                t1_end = format_ass_time(pair[1].start)
-                if pair[1].start <= pair[0].start:
-                    t1_end = format_ass_time((pair[0].start + pair[1].end) / 2.0)
-
-                pop_in = r"{\fscx115\fscy115\t(0,75,\fscx100\fscy100)}"
-                line1 = f"{pop_in}{{\\c&H0000FFFF&}}{w1_text} {{\\c&H00FFFFFF&}}{w2_text}"
-                events.append(f"Dialogue: 0,{t1_start},{t1_end},ShortsStyle,,0,0,0,,{line1}")
-
-                t2_start = t1_end
-                t2_end = format_ass_time(pair[1].end)
-                line2 = f"{{\\c&H00FFFFFF&}}{w1_text} {{\\c&H0000FFFF&}}{w2_text}"
-                events.append(f"Dialogue: 0,{t2_start},{t2_end},ShortsStyle,,0,0,0,,{line2}")
-
-    with open(ass_path, "w", encoding="utf-8") as f:
-        f.write(ass_header + "\n".join(events))
 
 def get_kick_clips():
     scraper = cloudscraper.create_scraper(browser={'browser': 'chrome', 'platform': 'windows', 'desktop': True})
@@ -479,7 +349,7 @@ def upload_to_youtube(youtube_service, filename, broadcaster=""):
         _, response = request.next_chunk()
     print(f"BASARILI - YouTube'a yuklendi (Private): https://youtube.com/shorts/{response.get('id')}")
 
-def process_clip(clip, drive, youtube, existing, whisper_model):
+def process_clip(clip, drive, youtube, existing):
     broadcaster = clip["broadcaster"]
     if broadcaster.lower() in BLACKLIST_CHANNELS:
         return False
@@ -496,19 +366,9 @@ def process_clip(clip, drive, youtube, existing, whisper_model):
         return False
         
     raw_file = f"raw_{clip_id}.mp4"
-    ass_file = f"sub_{clip_id}.ass"
     
     try:
         subprocess.run(["yt-dlp", "-o", raw_file, clip["url"]], check=True, timeout=120)
-        
-        use_subs = not has_embedded_subtitles(raw_file, broadcaster)
-        if use_subs:
-            generate_shorts_subtitles(raw_file, ass_file, whisper_model)
-            sub_filter = f",ass={ass_file}"
-        else:
-            print(f"{broadcaster} kendi altyazisina sahip -> Ek altyazi kapatildi")
-            sub_filter = ""
-        
         cam_box, _ = detect_webcam_box(raw_file)
         
         if cam_box is not None:
@@ -520,14 +380,14 @@ def process_clip(clip, drive, youtube, existing, whisper_model):
                 f"[gbg]scale=-1:1180,crop=1080:1180:(iw-1080)/2:0,boxblur=25:5[gblurred];"
                 f"[gfg]scale=1080:-2[gmain];"
                 f"[gblurred][gmain]overlay=0:(1180-h)/2[bottom];"
-                f"[top][bottom]vstack=inputs=2{sub_filter}"
+                f"[top][bottom]vstack=inputs=2"
             )
         else:
             vf_filter = (
                 f"split[bg][fg];"
                 f"[bg]scale=-1:1920,crop=1080:1920:(iw-1080)/2:0,boxblur=25:5[blurred];"
                 f"[fg]scale=1080:-2[main];"
-                f"[blurred][main]overlay=(W-w)/2:(H-h)/2{sub_filter}"
+                f"[blurred][main]overlay=(W-w)/2:(H-h)/2"
             )
         
         subprocess.run([
@@ -556,7 +416,7 @@ def process_clip(clip, drive, youtube, existing, whisper_model):
         print(f"Klip islenirken hata olustu ({broadcaster}), siradakine geciliyor: {e}")
         return False
     finally:
-        for temp in (raw_file, ass_file, filename):
+        for temp in (raw_file, filename):
             if os.path.exists(temp):
                 os.remove(temp)
 
@@ -568,13 +428,12 @@ def main():
     youtube = build("youtube", "v3", credentials=get_creds(YT_REFRESH_TOKEN))
     
     existing = get_existing_files(drive)
-    whisper_model = WhisperModel("small.en", device="cpu", compute_type="int8")
 
     uploaded = 0
     for clip in all_clips:
         if uploaded >= 2:
             break
-        if process_clip(clip, drive, youtube, existing, whisper_model):
+        if process_clip(clip, drive, youtube, existing):
             uploaded += 1
 
 if __name__ == "__main__":
