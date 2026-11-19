@@ -233,7 +233,7 @@ def detect_webcam_box(video_path):
                 return (cw, ch, cx, cy), side
 
             box_h = max(int(vh * 0.20), min(int(vh * 0.38), int(avg_h * 2.9)))
-            box_w = min(vw, int(box_h * (1080 / 760)))
+            box_w = min(vw, int(box_h * (1080 / 740)))
             crop_x = 0 if side == "left" else max(0, vw - box_w)
             crop_y = max(0, min(vh - box_h, avg_cy - int(box_h * 0.38)))
             return (box_w, box_h, crop_x, crop_y), side
@@ -294,7 +294,7 @@ PlayResY: 1920
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: ShortsStyle,Montserrat,82,&H00FFFFFF,&H0000FFFF,&H00000000,&H99000000,-1,0,0,0,100,100,1,0,1,8,3,2,50,50,360,1
+Style: ShortsStyle,Montserrat,82,&H00FFFFFF,&H0000FFFF,&H00000000,&H99000000,-1,0,0,0,100,100,1,0,1,8,3,2,50,50,240,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -509,15 +509,17 @@ def process_clip(clip, drive, youtube, existing, whisper_model):
             print(f"{broadcaster} kendi altyazisina sahip -> Ek altyazi kapatildi")
             sub_filter = ""
         
-        cam_box, cam_side = detect_webcam_box(raw_file)
+        cam_box, _ = detect_webcam_box(raw_file)
         
         if cam_box is not None:
             cw, ch, cx, cy = cam_box
-            game_crop_x = "(iw-1080)/3" if cam_side == "right" else "2*(iw-1080)/3"
             vf_filter = (
                 f"split[cam][game];"
-                f"[cam]crop={cw}:{ch}:{cx}:{cy},scale=1080:760:force_original_aspect_ratio=increase,crop=1080:760[top];"
-                f"[game]scale=-1:1160,crop=1080:1160:{game_crop_x}:0[bottom];"
+                f"[cam]crop={cw}:{ch}:{cx}:{cy},scale=1080:740:force_original_aspect_ratio=increase,crop=1080:740[top];"
+                f"[game]split[gbg][gfg];"
+                f"[gbg]scale=-1:1180,crop=1080:1180:(iw-1080)/2:0,boxblur=25:5[gblurred];"
+                f"[gfg]scale=1080:-2[gmain];"
+                f"[gblurred][gmain]overlay=0:(1180-h)/2[bottom];"
                 f"[top][bottom]vstack=inputs=2{sub_filter}"
             )
         else:
