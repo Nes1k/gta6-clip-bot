@@ -20,7 +20,7 @@ jobs:
       - name: Install Tools
         run: |
           sudo apt-get update && sudo apt-get install -y ffmpeg
-          pip install yt-dlp requests cloudscraper opencv-python-headless numpy google-api-python-client google-auth
+          pip install yt-dlp requests cloudscraper faster-whisper opencv-python-headless numpy google-api-python-client google-auth
 
       - name: Run Bot
         env:
