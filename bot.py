@@ -249,7 +249,7 @@ def get_twitch_clips():
         token = r_tok.json()["access_token"]
         headers = {"Client-ID": TWITCH_CLIENT_ID, "Authorization": f"Bearer {token}"}
         
-        started_at = (datetime.now(timezone.utc) - timedelta(hours=12)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        started_at = (datetime.now(timezone.utc) - timedelta(hours=48)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
         r_users = requests.get("https://api.twitch.tv/helix/users", headers=headers, params={"login": TWITCH_PRIORITY_STREAMERS}, timeout=15)
         for u in r_users.json().get("data", []):
