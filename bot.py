@@ -1,4 +1,5 @@
 import os
+import re
 import cv2
 import time
 import random
@@ -11,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
+from faster_whisper import WhisperModel
 
 TWITCH_CLIENT_ID = os.environ["TWITCH_CLIENT_ID"]
 TWITCH_CLIENT_SECRET = os.environ["TWITCH_CLIENT_SECRET"]
@@ -45,6 +47,11 @@ TWITCH_PRIORITY_STREAMERS = [
     "summit1g"
 ]
 
+BUILTIN_SUB_STREAMERS = {
+    "caseoh_",
+    "caseoh"
+}
+
 BLACKLIST_CHANNELS = {
     "trailer_kanal_adi_1",
     "trailer_kanal_adi_2"
@@ -52,20 +59,48 @@ BLACKLIST_CHANNELS = {
 
 SKIP_KEYWORDS = ["trailer", "fivem", "gta 5", "gtav", "mod", "roleplay", "rp", "reroll"]
 
-YT_TITLES_EN = [
-    "GTA 6 Physics Are Actually INSANE! 🤯 #gta6 #shorts",
-    "Rockstar Really Thought of Everything in GTA 6... 🔥 #gta6 #shorts",
-    "This GTA 6 Detail Blew Everyone's Mind! 😱 #gtavi #shorts",
-    "GTA 6 Gameplay Looks Next-Gen! 🚨 #gta6 #rockstargames #shorts",
-    "No Way This Just Happened in GTA 6... 😭 #gta6 #gtavi #shorts"
+BAD_ROOTS = [
+    "fuck", "shit", "bitch", "asshole", "bastard", "dick", "pussy",
+    "cunt", "nigg", "faggot", "retard", "whore", "slut", "motherf"
 ]
 
 YUNET_MODEL_PATH = "face_detection_yunet_2023mar.onnx"
 YUNET_URL = "https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx"
 
-def ensure_yunet_model():
+FONT_PATH = "Poppins-Black.ttf"
+FONT_URL = "https://github.com/google/fonts/raw/main/ofl/poppins/Poppins-Black.ttf"
+
+def ensure_assets():
     if not os.path.exists(YUNET_MODEL_PATH):
         urllib.request.urlretrieve(YUNET_URL, YUNET_MODEL_PATH)
+    if not os.path.exists(FONT_PATH):
+        urllib.request.urlretrieve(FONT_URL, FONT_PATH)
+
+def has_embedded_subtitles(video_path, broadcaster=""):
+    if broadcaster.lower() in BUILTIN_SUB_STREAMERS:
+        return True
+    cap = cv2.VideoCapture(video_path)
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    vw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    vh = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    if total_frames <= 0 or vw <= 0 or vh <= 0:
+        cap.release()
+        return False
+
+    text_like_frames = 0
+    for i in [2, 5, 8]:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, int(total_frames * (i / 10.0)))
+        ret, frame = cap.read()
+        if not ret:
+            continue
+        roi = frame[int(vh * 0.80):int(vh * 0.95), int(vw * 0.30):int(vw * 0.70)]
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        edges = cv2.Canny(gray, 150, 300)
+        edge_density = edges.mean() / 255.0
+        if 0.04 < edge_density < 0.25:
+            text_like_frames += 1
+    cap.release()
+    return text_like_frames >= 2
 
 def find_webcam_frame_bounds(frames, face_cx, face_cy, face_w, face_h, vw, vh):
     if len(frames) < 2:
@@ -141,7 +176,7 @@ def detect_webcam_box(video_path):
         return None, "fullscreen"
 
     try:
-        ensure_yunet_model()
+        ensure_assets()
         detector = cv2.FaceDetectorYN.create(
             YUNET_MODEL_PATH, "", (vw, vh),
             score_threshold=0.65, nms_threshold=0.3, top_k=5
@@ -206,6 +241,120 @@ def detect_webcam_box(video_path):
 
     return None, "fullscreen"
 
+def censor_word(word_str):
+    stripped = re.sub(r'[^\w]', '', word_str).lower()
+    if any(root in stripped for root in BAD_ROOTS):
+        return word_str[0] + "***"
+    return word_str
+
+def format_ass_time(seconds):
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    s = int(seconds % 60)
+    cs = int((seconds - int(seconds)) * 100)
+    return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
+
+def extract_clean_voice_wav(video_path, wav_path):
+    subprocess.run([
+        "ffmpeg", "-y", "-i", video_path, "-t", "58",
+        "-vn", "-ac", "1", "-ar", "16000",
+        "-af", "highpass=f=120,lowpass=f=4500,dynaudnorm=f=150:g=15",
+        wav_path
+    ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
+
+def generate_shorts_subtitles(video_path, ass_path, model, is_split_screen=True):
+    """
+    Cümle bazlı yüksek doğruluklu transkripsiyonu (distil-medium.en) alıp
+    matematiksel olarak pürüzsüz 2 kelimelik Karaoke Pop-Up bloklarına böler.
+    """
+    clean_wav = video_path + "_clean.wav"
+    try:
+        extract_clean_voice_wav(video_path, clean_wav)
+        audio_input = clean_wav
+    except Exception:
+        audio_input = video_path
+
+    segments, _ = model.transcribe(
+        audio_input,
+        language="en",
+        beam_size=5,
+        word_timestamps=False,
+        vad_filter=True,
+        no_speech_threshold=0.62,
+        condition_on_previous_text=False,
+        vad_parameters=dict(min_silence_duration_ms=400)
+    )
+
+    if os.path.exists(clean_wav):
+        os.remove(clean_wav)
+
+    # Split-screen'de tam kamera-oyun birleşim çizgisine (Y=780), tam ekranda ortaya (Alignment 5)
+    if is_split_screen:
+        alignment = 8
+        margin_v = 710
+    else:
+        alignment = 5
+        margin_v = 0
+
+    ass_header = f"""[Script Info]
+ScriptType: v4.00+
+PlayResX: 1080
+PlayResY: 1920
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: ShortsStyle,Poppins Black,76,&H00FFFFFF,&H0000FFFF,&H00000000,&HAA000000,-1,0,0,0,100,100,1,0,1,9,4,{alignment},60,60,{margin_v},1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+    events = []
+    for segment in segments:
+        raw_text = segment.text.strip()
+        if not raw_text:
+            continue
+        words = [censor_word(w).upper() for w in raw_text.split() if re.sub(r'[^\w]', '', w)]
+        if not words:
+            continue
+
+        seg_start = segment.start
+        seg_end = segment.end
+        total_dur = max(0.4, seg_end - seg_start)
+        total_chars = sum(len(w) for w in words)
+        if total_chars == 0:
+            continue
+
+        # Her kelimeye karakter uzunluğuna orantılı pürüzsüz zaman aralığı hesapla
+        timed_words = []
+        cursor = seg_start
+        for w in words:
+            w_dur = max(0.18, total_dur * (len(w) / total_chars))
+            timed_words.append((w, cursor, min(seg_end, cursor + w_dur)))
+            cursor += w_dur
+
+        for idx in range(0, len(timed_words), 2):
+            pair = timed_words[idx:idx + 2]
+            if len(pair) == 1:
+                w1, t1, t2 = pair[0]
+                if t2 - t1 < 0.15:
+                    continue
+                pop = r"{\fscx114\fscy114\t(0,70,\fscx100\fscy100)\c&H0000FFFF&}"
+                events.append(f"Dialogue: 0,{format_ass_time(t1)},{format_ass_time(t2)},ShortsStyle,,0,0,0,,{pop}{w1}")
+            else:
+                w1, t1_start, t1_end = pair[0]
+                w2, t2_start, t2_end = pair[1]
+                if t2_end - t1_start < 0.25:
+                    continue
+                pop_in = r"{\fscx114\fscy114\t(0,70,\fscx100\fscy100)}"
+                line1 = f"{pop_in}{{\\c&H0000FFFF&}}{w1} {{\\c&H00FFFFFF&}}{w2}"
+                events.append(f"Dialogue: 0,{format_ass_time(t1_start)},{format_ass_time(t1_end)},ShortsStyle,,0,0,0,,{line1}")
+
+                line2 = f"{{\\c&H00FFFFFF&}}{w1} {{\\c&H0000FFFF&}}{w2}"
+                events.append(f"Dialogue: 0,{format_ass_time(t1_end)},{format_ass_time(t2_end)},ShortsStyle,,0,0,0,,{line2}")
+
+    with open(ass_path, "w", encoding="utf-8") as f:
+        f.write(ass_header + "\n".join(events))
+
 def get_kick_clips():
     scraper = cloudscraper.create_scraper(browser={'browser': 'chrome', 'platform': 'windows', 'desktop': True})
     kick_list = []
@@ -214,13 +363,13 @@ def get_kick_clips():
     
     for streamer in streamers:
         try:
-            url = f"https://kick.com/api/v2/channels/{streamer}/clips?cursor=0&sort=views&time=day"
+            url = f"https://kick.com/api/v2/channels/{streamer}/clips?cursor=0&sort=views&time=week"
             r = scraper.get(url, timeout=15)
             if r.status_code != 200:
                 continue
             data = r.json().get("clips", [])
             for c in data[:3]:
-                if c.get("view_count", 0) < 30:
+                if c.get("view_count", 0) < 15:
                     continue
                 video_url = c.get("clip_url") or c.get("video_url")
                 if not video_url:
@@ -259,7 +408,7 @@ def get_twitch_clips():
                 "first": 5
             }, timeout=15)
             for clip in r_uclips.json().get("data", []):
-                if clip.get("view_count", 0) < 25:
+                if clip.get("view_count", 0) < 10:
                     continue
                 twitch_list.append({
                     "id": clip["id"],
@@ -280,7 +429,7 @@ def get_twitch_clips():
                 "first": 50
             }, timeout=15)
             for clip in r.json().get("data", []):
-                if clip.get("language") != "en" or clip.get("view_count", 0) < 40:
+                if clip.get("language") != "en" or clip.get("view_count", 0) < 15:
                     continue
                 twitch_list.append({
                     "id": clip["id"],
@@ -294,7 +443,7 @@ def get_twitch_clips():
         print(f"Twitch API hatasi: {e}")
 
     twitch_list.sort(key=lambda x: x["views"], reverse=True)
-    top_pool = twitch_list[:15]
+    top_pool = twitch_list[:20]
     random.shuffle(top_pool)
     return top_pool
 
@@ -325,31 +474,7 @@ def upload_to_drive(drive_service, filename, folder_id):
     while response is None:
         _, response = request.next_chunk()
 
-def upload_to_youtube(youtube_service, filename, broadcaster=""):
-    base_title = random.choice(YT_TITLES_EN)
-    title = f"{broadcaster} - {base_title}"[:95]
-    desc = f"{broadcaster} Grand Theft Auto VI (GTA 6) best moments and reactions.\n\n#gta6 #gtavi #{broadcaster.lower()} #shorts"
-
-    body = {
-        "snippet": {
-            "title": title,
-            "description": desc,
-            "tags": ["gta 6", "gta vi", "rockstar games", "gta 6 gameplay", "shorts", broadcaster.lower()],
-            "categoryId": "20"
-        },
-        "status": {
-            "privacyStatus": "private",
-            "selfDeclaredMadeForKids": False
-        }
-    }
-    media = MediaFileUpload(filename, mimetype="video/mp4", chunksize=2*1024*1024, resumable=True)
-    request = youtube_service.videos().insert(part="snippet,status", body=body, media_body=media)
-    response = None
-    while response is None:
-        _, response = request.next_chunk()
-    print(f"BASARILI - YouTube'a yuklendi (Private): https://youtube.com/shorts/{response.get('id')}")
-
-def process_clip(clip, drive, youtube, existing):
+def process_clip(clip, drive, existing, whisper_model):
     broadcaster = clip["broadcaster"]
     if broadcaster.lower() in BLACKLIST_CHANNELS:
         return False
@@ -366,12 +491,22 @@ def process_clip(clip, drive, youtube, existing):
         return False
         
     raw_file = f"raw_{clip_id}.mp4"
+    ass_file = f"sub_{clip_id}.ass"
     
     try:
         subprocess.run(["yt-dlp", "-o", raw_file, clip["url"]], check=True, timeout=120)
         cam_box, _ = detect_webcam_box(raw_file)
+        is_split = cam_box is not None
         
-        if cam_box is not None:
+        use_subs = not has_embedded_subtitles(raw_file, broadcaster)
+        if use_subs:
+            generate_shorts_subtitles(raw_file, ass_file, whisper_model, is_split_screen=is_split)
+            sub_filter = f",ass={ass_file}:fontsdir=."
+        else:
+            print(f"{broadcaster} kendi altyazisina sahip -> Ek altyazi kapatildi")
+            sub_filter = ""
+        
+        if is_split:
             cw, ch, cx, cy = cam_box
             vf_filter = (
                 f"split[cam][game];"
@@ -380,14 +515,14 @@ def process_clip(clip, drive, youtube, existing):
                 f"[gbg]scale=-1:1180,crop=1080:1180:(iw-1080)/2:0,boxblur=25:5[gblurred];"
                 f"[gfg]scale=1080:-2[gmain];"
                 f"[gblurred][gmain]overlay=0:(1180-h)/2[bottom];"
-                f"[top][bottom]vstack=inputs=2"
+                f"[top][bottom]vstack=inputs=2{sub_filter}"
             )
         else:
             vf_filter = (
                 f"split[bg][fg];"
                 f"[bg]scale=-1:1920,crop=1080:1920:(iw-1080)/2:0,boxblur=25:5[blurred];"
                 f"[fg]scale=1080:-2[main];"
-                f"[blurred][main]overlay=(W-w)/2:(H-h)/2"
+                f"[blurred][main]overlay=(W-w)/2:(H-h)/2{sub_filter}"
             )
         
         subprocess.run([
@@ -405,35 +540,29 @@ def process_clip(clip, drive, youtube, existing):
                 print(f"Drive tekrar deneniyor ({attempt+1}/3): {e}")
                 time.sleep(3)
                 drive = build("drive", "v3", credentials=get_creds(GDRIVE_REFRESH_TOKEN))
-        
-        try:
-            upload_to_youtube(youtube, filename, broadcaster=broadcaster)
-        except Exception as e:
-            print(f"YouTube kotasi dolu veya atlandi: {e}")
 
         return True
     except Exception as e:
         print(f"Klip islenirken hata olustu ({broadcaster}), siradakine geciliyor: {e}")
         return False
     finally:
-        for temp in (raw_file, filename):
+        for temp in (raw_file, ass_file, filename):
             if os.path.exists(temp):
                 os.remove(temp)
 
 def main():
-    ensure_yunet_model()
+    ensure_assets()
     all_clips = get_twitch_clips() + get_kick_clips()
     
     drive = build("drive", "v3", credentials=get_creds(GDRIVE_REFRESH_TOKEN))
-    youtube = build("youtube", "v3", credentials=get_creds(YT_REFRESH_TOKEN))
-    
     existing = get_existing_files(drive)
+    whisper_model = WhisperModel("distil-medium.en", device="cpu", compute_type="int8")
 
     uploaded = 0
     for clip in all_clips:
         if uploaded >= 2:
             break
-        if process_clip(clip, drive, youtube, existing):
+        if process_clip(clip, drive, existing, whisper_model):
             uploaded += 1
 
 if __name__ == "__main__":
