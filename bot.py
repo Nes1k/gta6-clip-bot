@@ -255,29 +255,54 @@ def format_ass_time(seconds):
     cs = int((seconds - int(seconds)) * 100)
     return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
 
-def generate_shorts_subtitles(video_path, ass_path, model, is_split_screen=True):
-    """
-    Orijinal ham ses üzerinde tam medium.en modeli ve gerçek kelime zaman damgaları
-    (word_timestamps=True) kullanarak milimetrik senkronlu 2 kelimelik altyazı üretir.
-    """
-    segments, _ = model.transcribe(
-        video_path,
-        language="en",
-        beam_size=5,
-        word_timestamps=True,
-        vad_filter=True,
-        no_speech_threshold=0.65,
-        log_prob_threshold=-0.8,
-        condition_on_previous_text=False,
-        vad_parameters=dict(min_silence_duration_ms=450)
-    )
+def generate_hook_banner_text(raw_title, broadcaster):
+    """Klibin orijinal başlığından ekranda şık duracak kısa bir konu başlığı (Hook) üretir."""
+    cleaned = re.sub(r'#\w+', '', raw_title)
+    cleaned = re.sub(r'http\S+', '', cleaned)
+    cleaned = re.sub(r'[^\w\s\'\?\!]', '', cleaned).strip()
+    words = [censor_word(w) for w in cleaned.split() if len(w) > 1]
+    
+    # Başlık çok kısa veya anlamsızsa yayıncı adına özel ilgi çekici başlık oluştur
+    generic_words = {"clip", "untitled", "twitch", "kick", "live", "stream", "gta", "gta6", "gtavi"}
+    meaningful = [w for w in words if w.lower() not in generic_words]
+    
+    if len(meaningful) < 2:
+        fallbacks = [
+            f"{broadcaster.upper()}'S REACTION IS PRICELESS",
+            f"WATCH {broadcaster.upper()} LOSE HIS MIND",
+            f"{broadcaster.upper()} COULDN'T BELIEVE THIS",
+            f"THIS GTA 6 MOMENT BROKE {broadcaster.upper()}"
+        ]
+        return random.choice(fallbacks)
+        
+    hook = " ".join(words[:7]).upper()
+    return hook
 
+def extract_streamer_foreground_audio(video_path, wav_path):
+    """
+    Oyun içi arka plan karakter konuşmalarını susturup (Noise Gate),
+    sadece mikrofona yakın olan yayıncının baskın sesini geçirir.
+    """
+    subprocess.run([
+        "ffmpeg", "-y", "-i", video_path, "-t", "58",
+        "-vn", "-ac", "1", "-ar", "16000",
+        "-af", "agate=threshold=-26dB:ratio=9:attack=10:release=150",
+        wav_path
+    ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
+
+def generate_shorts_ass(video_path, ass_path, model, hook_text, is_split_screen=True, add_speech_subs=True):
+    """
+    Tek bir ASS dosyasında hem üst-orta kanca başlığını (Hook Banner)
+    hem de oyun içi seslerden arındırılmış konuşma altyazılarını üretir.
+    """
     if is_split_screen:
-        alignment = 8
-        margin_v = 710
+        hook_y = 740      # Tam kamera ve oyun birleşim çizgisi
+        sub_margin_v = 960 # Oyun ekranının hemen üst sınırı (başlıkla çakışmaz)
+        sub_align = 8
     else:
-        alignment = 5
-        margin_v = 0
+        hook_y = 320      # Tam ekranda üst orta kanca
+        sub_margin_v = 280 # Alt orta konuşma altyazısı
+        sub_align = 2
 
     ass_header = f"""[Script Info]
 ScriptType: v4.00+
@@ -286,57 +311,85 @@ PlayResY: 1920
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: ShortsStyle,Poppins Black,76,&H00FFFFFF,&H0000FFFF,&H00000000,&HAA000000,-1,0,0,0,100,100,1,0,1,9,4,{alignment},60,60,{margin_v},1
+Style: HookStyle,Poppins Black,46,&H00000000,&H00000000,&H00FFFFFF,&H00FFFFFF,-1,0,0,0,100,100,1,0,3,16,0,5,70,70,0,1
+Style: ShortsStyle,Poppins Black,72,&H00FFFFFF,&H0000FFFF,&H00000000,&HAA000000,-1,0,0,0,100,100,1,0,1,8,3,{sub_align},60,60,{sub_margin_v},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
     events = []
-    for segment in segments:
-        if not segment.words:
-            continue
 
-        # Düşük güvenli (halüsinasyon) kelimeleri ele
-        valid_words = [
-            w for w in segment.words
-            if w.probability >= 0.50 and re.sub(r'[^\w]', '', w.word)
-        ]
-        if not valid_words:
-            continue
+    # 1. Videonun konusu / kanca başlığı (İlk 8 saniye veya tüm klip boyunca şık beyaz kutu içinde siyah yazı)
+    hook_tag = rf"{{\an5\pos(540,{hook_y})\fad(150,300)}}"
+    events.append(f"Dialogue: 1,0:00:00.00,0:00:58.00,HookStyle,,0,0,0,,{hook_tag}{hook_text}")
 
-        for idx in range(0, len(valid_words), 2):
-            pair = valid_words[idx:idx + 2]
-            w1_text = censor_word(pair[0].word.strip()).upper()
+    # 2. Yayıncının konuşma altyazıları (Oyun içi konuşmalar filtrelenmiş halde)
+    if add_speech_subs:
+        gate_wav = video_path + "_gate.wav"
+        try:
+            extract_streamer_foreground_audio(video_path, gate_wav)
+            audio_src = gate_wav
+        except Exception:
+            audio_src = video_path
 
-            if len(pair) == 1:
-                t_start = pair[0].start
-                t_end = max(t_start + 0.25, pair[0].end)
-                pop = r"{\fscx114\fscy114\t(0,70,\fscx100\fscy100)\c&H0000FFFF&}"
-                events.append(
-                    f"Dialogue: 0,{format_ass_time(t_start)},{format_ass_time(t_end)},ShortsStyle,,0,0,0,,{pop}{w1_text}"
-                )
-            else:
-                w2_text = censor_word(pair[1].word.strip()).upper()
-                t1_start = pair[0].start
-                t2_end = max(t1_start + 0.35, pair[1].end)
+        segments, _ = model.transcribe(
+            audio_src,
+            language="en",
+            beam_size=5,
+            word_timestamps=True,
+            vad_filter=True,
+            no_speech_threshold=0.68,
+            log_prob_threshold=-0.75,
+            condition_on_previous_text=False,
+            vad_parameters=dict(min_silence_duration_ms=450)
+        )
 
-                # İki kelime arasındaki geçiş noktasını gerçek konuşma zamanından al
-                mid_t = pair[1].start
-                if mid_t <= t1_start + 0.10:
-                    mid_t = t1_start + (t2_end - t1_start) * 0.5
-                elif mid_t >= t2_end - 0.10:
-                    mid_t = t2_end - 0.10
+        if os.path.exists(gate_wav):
+            os.remove(gate_wav)
 
-                pop_in = r"{\fscx114\fscy114\t(0,70,\fscx100\fscy100)}"
-                line1 = f"{pop_in}{{\\c&H0000FFFF&}}{w1_text} {{\\c&H00FFFFFF&}}{w2_text}"
-                events.append(
-                    f"Dialogue: 0,{format_ass_time(t1_start)},{format_ass_time(mid_t)},ShortsStyle,,0,0,0,,{line1}"
-                )
+        for segment in segments:
+            if not segment.words:
+                continue
 
-                line2 = f"{{\\c&H00FFFFFF&}}{w1_text} {{\\c&H0000FFFF&}}{w2_text}"
-                events.append(
-                    f"Dialogue: 0,{format_ass_time(mid_t)},{format_ass_time(t2_end)},ShortsStyle,,0,0,0,,{line2}"
-                )
+            valid_words = [
+                w for w in segment.words
+                if w.probability >= 0.55 and re.sub(r'[^\w]', '', w.word)
+            ]
+            if not valid_words:
+                continue
+
+            for idx in range(0, len(valid_words), 2):
+                pair = valid_words[idx:idx + 2]
+                w1_text = censor_word(pair[0].word.strip()).upper()
+
+                if len(pair) == 1:
+                    t_start = pair[0].start
+                    t_end = max(t_start + 0.25, pair[0].end)
+                    pop = r"{\fscx114\fscy114\t(0,70,\fscx100\fscy100)\c&H0000FFFF&}"
+                    events.append(
+                        f"Dialogue: 0,{format_ass_time(t_start)},{format_ass_time(t_end)},ShortsStyle,,0,0,0,,{pop}{w1_text}"
+                    )
+                else:
+                    w2_text = censor_word(pair[1].word.strip()).upper()
+                    t1_start = pair[0].start
+                    t2_end = max(t1_start + 0.35, pair[1].end)
+
+                    mid_t = pair[1].start
+                    if mid_t <= t1_start + 0.10:
+                        mid_t = t1_start + (t2_end - t1_start) * 0.5
+                    elif mid_t >= t2_end - 0.10:
+                        mid_t = t2_end - 0.10
+
+                    pop_in = r"{\fscx114\fscy114\t(0,70,\fscx100\fscy100)}"
+                    line1 = f"{pop_in}{{\\c&H0000FFFF&}}{w1_text} {{\\c&H00FFFFFF&}}{w2_text}"
+                    events.append(
+                        f"Dialogue: 0,{format_ass_time(t1_start)},{format_ass_time(mid_t)},ShortsStyle,,0,0,0,,{line1}"
+                    )
+
+                    line2 = f"{{\\c&H00FFFFFF&}}{w1_text} {{\\c&H0000FFFF&}}{w2_text}"
+                    events.append(
+                        f"Dialogue: 0,{format_ass_time(mid_t)},{format_ass_time(t2_end)},ShortsStyle,,0,0,0,,{line2}"
+                    )
 
     with open(ass_path, "w", encoding="utf-8") as f:
         f.write(ass_header + "\n".join(events))
@@ -484,13 +537,18 @@ def process_clip(clip, drive, existing, whisper_model):
         cam_box, _ = detect_webcam_box(raw_file)
         is_split = cam_box is not None
         
-        use_subs = not has_embedded_subtitles(raw_file, broadcaster)
-        if use_subs:
-            generate_shorts_subtitles(raw_file, ass_file, whisper_model, is_split_screen=is_split)
-            sub_filter = f",ass={ass_file}:fontsdir=."
-        else:
-            print(f"{broadcaster} kendi altyazisina sahip -> Ek altyazi kapatildi")
-            sub_filter = ""
+        add_subs = not has_embedded_subtitles(raw_file, broadcaster)
+        hook_text = generate_hook_banner_text(clip["title"], broadcaster)
+        
+        generate_shorts_ass(
+            raw_file,
+            ass_file,
+            whisper_model,
+            hook_text=hook_text,
+            is_split_screen=is_split,
+            add_speech_subs=add_subs
+        )
+        sub_filter = f",ass={ass_file}:fontsdir=."
         
         if is_split:
             cw, ch, cx, cy = cam_box
