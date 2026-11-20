@@ -29,10 +29,11 @@ KICK_STREAMERS = [
     "n3on",
     "trainwreckstv",
     "destiny",
-    "brucedropemoff"
+    "brucedropemoff",
+    "rangesh"
 ]
 
-TWITCH_PRIORITY_STREAMERS = [
+TWITCH_VIRAL_STREAMERS = [
     "kaicenat",
     "ishowspeed",
     "xqc",
@@ -42,9 +43,14 @@ TWITCH_PRIORITY_STREAMERS = [
     "agent00",
     "stableronaldo",
     "lacy",
+    "thesketchreal",
+    "fanum",
+    "dukedennis",
     "hasanabi",
     "lirik",
-    "summit1g"
+    "summit1g",
+    "caedrel",
+    "shroud"
 ]
 
 BUILTIN_SUB_STREAMERS = {
@@ -57,7 +63,7 @@ BLACKLIST_CHANNELS = {
     "trailer_kanal_adi_2"
 }
 
-SKIP_KEYWORDS = ["trailer", "fivem", "gta 5", "gtav", "mod", "roleplay", "rp", "reroll"]
+SKIP_KEYWORDS = ["reroll", "rerun", "ad break", "sponsor", "subathon timer"]
 
 BAD_ROOTS = [
     "fuck", "shit", "bitch", "asshole", "bastard", "dick", "pussy",
@@ -256,14 +262,12 @@ def format_ass_time(seconds):
     return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
 
 def generate_hook_banner_text(raw_title, broadcaster):
-    """Klibin orijinal başlığından ekranda şık duracak kısa bir konu başlığı (Hook) üretir."""
     cleaned = re.sub(r'#\w+', '', raw_title)
     cleaned = re.sub(r'http\S+', '', cleaned)
     cleaned = re.sub(r'[^\w\s\'\?\!]', '', cleaned).strip()
     words = [censor_word(w) for w in cleaned.split() if len(w) > 1]
     
-    # Başlık çok kısa veya anlamsızsa yayıncı adına özel ilgi çekici başlık oluştur
-    generic_words = {"clip", "untitled", "twitch", "kick", "live", "stream", "gta", "gta6", "gtavi"}
+    generic_words = {"clip", "untitled", "twitch", "kick", "live", "stream", "irl", "gaming"}
     meaningful = [w for w in words if w.lower() not in generic_words]
     
     if len(meaningful) < 2:
@@ -271,7 +275,7 @@ def generate_hook_banner_text(raw_title, broadcaster):
             f"{broadcaster.upper()}'S REACTION IS PRICELESS",
             f"WATCH {broadcaster.upper()} LOSE HIS MIND",
             f"{broadcaster.upper()} COULDN'T BELIEVE THIS",
-            f"THIS GTA 6 MOMENT BROKE {broadcaster.upper()}"
+            f"BRO WHAT JUST HAPPENED TO {broadcaster.upper()}"
         ]
         return random.choice(fallbacks)
         
@@ -279,10 +283,6 @@ def generate_hook_banner_text(raw_title, broadcaster):
     return hook
 
 def extract_streamer_foreground_audio(video_path, wav_path):
-    """
-    Oyun içi arka plan karakter konuşmalarını susturup (Noise Gate),
-    sadece mikrofona yakın olan yayıncının baskın sesini geçirir.
-    """
     subprocess.run([
         "ffmpeg", "-y", "-i", video_path, "-t", "58",
         "-vn", "-ac", "1", "-ar", "16000",
@@ -291,17 +291,13 @@ def extract_streamer_foreground_audio(video_path, wav_path):
     ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
 
 def generate_shorts_ass(video_path, ass_path, model, hook_text, is_split_screen=True, add_speech_subs=True):
-    """
-    Tek bir ASS dosyasında hem üst-orta kanca başlığını (Hook Banner)
-    hem de oyun içi seslerden arındırılmış konuşma altyazılarını üretir.
-    """
     if is_split_screen:
-        hook_y = 740      # Tam kamera ve oyun birleşim çizgisi
-        sub_margin_v = 960 # Oyun ekranının hemen üst sınırı (başlıkla çakışmaz)
+        hook_y = 740
+        sub_margin_v = 960
         sub_align = 8
     else:
-        hook_y = 320      # Tam ekranda üst orta kanca
-        sub_margin_v = 280 # Alt orta konuşma altyazısı
+        hook_y = 320
+        sub_margin_v = 280
         sub_align = 2
 
     ass_header = f"""[Script Info]
@@ -318,12 +314,9 @@ Style: ShortsStyle,Poppins Black,72,&H00FFFFFF,&H0000FFFF,&H00000000,&HAA000000,
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
     events = []
-
-    # 1. Videonun konusu / kanca başlığı (İlk 8 saniye veya tüm klip boyunca şık beyaz kutu içinde siyah yazı)
     hook_tag = rf"{{\an5\pos(540,{hook_y})\fad(150,300)}}"
     events.append(f"Dialogue: 1,0:00:00.00,0:00:58.00,HookStyle,,0,0,0,,{hook_tag}{hook_text}")
 
-    # 2. Yayıncının konuşma altyazıları (Oyun içi konuşmalar filtrelenmiş halde)
     if add_speech_subs:
         gate_wav = video_path + "_gate.wav"
         try:
@@ -407,8 +400,8 @@ def get_kick_clips():
             if r.status_code != 200:
                 continue
             data = r.json().get("clips", [])
-            for c in data[:3]:
-                if c.get("view_count", 0) < 15:
+            for c in data[:5]:
+                if c.get("view_count", 0) < 100:
                     continue
                 video_url = c.get("clip_url") or c.get("video_url")
                 if not video_url:
@@ -416,15 +409,18 @@ def get_kick_clips():
                 kick_list.append({
                     "id": str(c["id"]),
                     "broadcaster": streamer.capitalize(),
-                    "title": c.get("title", "GTA 6 Clip"),
+                    "title": c.get("title", "Viral Stream Clip"),
                     "url": video_url,
                     "platform": "kick",
                     "views": c.get("view_count", 0)
                 })
         except Exception as e:
             print(f"Kick ({streamer}) cekilemedi: {e}")
-    random.shuffle(kick_list)
-    return kick_list
+
+    kick_list.sort(key=lambda x: x["views"], reverse=True)
+    top_kick = kick_list[:15]
+    random.shuffle(top_kick)
+    return top_kick
 
 def get_twitch_clips():
     twitch_list = []
@@ -439,36 +435,15 @@ def get_twitch_clips():
         
         started_at = (datetime.now(timezone.utc) - timedelta(hours=48)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-        r_users = requests.get("https://api.twitch.tv/helix/users", headers=headers, params={"login": TWITCH_PRIORITY_STREAMERS}, timeout=15)
+        r_users = requests.get("https://api.twitch.tv/helix/users", headers=headers, params={"login": TWITCH_VIRAL_STREAMERS}, timeout=15)
         for u in r_users.json().get("data", []):
             r_uclips = requests.get("https://api.twitch.tv/helix/clips", headers=headers, params={
                 "broadcaster_id": u["id"],
                 "started_at": started_at,
-                "first": 5
+                "first": 10
             }, timeout=15)
             for clip in r_uclips.json().get("data", []):
-                if clip.get("view_count", 0) < 10:
-                    continue
-                twitch_list.append({
-                    "id": clip["id"],
-                    "broadcaster": clip["broadcaster_name"],
-                    "title": clip["title"],
-                    "url": clip["url"],
-                    "platform": "twitch",
-                    "views": clip.get("view_count", 0)
-                })
-
-        r_game = requests.get("https://api.twitch.tv/helix/games", headers=headers, params={"name": "Grand Theft Auto VI"}, timeout=15)
-        data = r_game.json().get("data", [])
-        if data:
-            game_id = data[0]["id"]
-            r = requests.get("https://api.twitch.tv/helix/clips", headers=headers, params={
-                "game_id": game_id,
-                "started_at": started_at,
-                "first": 50
-            }, timeout=15)
-            for clip in r.json().get("data", []):
-                if clip.get("language") != "en" or clip.get("view_count", 0) < 15:
+                if clip.get("language") != "en" or clip.get("view_count", 0) < 100:
                     continue
                 twitch_list.append({
                     "id": clip["id"],
@@ -482,7 +457,7 @@ def get_twitch_clips():
         print(f"Twitch API hatasi: {e}")
 
     twitch_list.sort(key=lambda x: x["views"], reverse=True)
-    top_pool = twitch_list[:20]
+    top_pool = twitch_list[:25]
     random.shuffle(top_pool)
     return top_pool
 
@@ -578,7 +553,7 @@ def process_clip(clip, drive, existing, whisper_model):
         for attempt in range(3):
             try:
                 upload_to_drive(drive, filename, FOLDER_ID)
-                print(f"Drive'a yuklendi: {filename}")
+                print(f"Drive'a yuklendi: {filename} ({clip['views']} izlenme)")
                 break
             except Exception as e:
                 print(f"Drive tekrar deneniyor ({attempt+1}/3): {e}")
@@ -597,6 +572,7 @@ def process_clip(clip, drive, existing, whisper_model):
 def main():
     ensure_assets()
     all_clips = get_twitch_clips() + get_kick_clips()
+    random.shuffle(all_clips)
     
     drive = build("drive", "v3", credentials=get_creds(GDRIVE_REFRESH_TOKEN))
     existing = get_existing_files(drive)
